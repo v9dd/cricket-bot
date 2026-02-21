@@ -183,38 +183,53 @@ def fetch_match_update(match_url, match_name):
         # GET LATEST EVENT (YOUR EXACT STRUCTURE)
         # =========================
 
+# =========================
+# GET LATEST EVENT (HANDLE OVER SUMMARY CASE)
+# =========================
+
         commentary_main = soup.find(
             "div",
             class_=lambda x: x and "leading-6" in x
         )
-
+        
         if not commentary_main:
             print(f"No commentary container found for {match_name}")
             return
-
-        first_wrapper = commentary_main.find("div", recursive=False)
-
-        if not first_wrapper:
-            print(f"No first wrapper found for {match_name}")
+        
+        # get all direct event blocks
+        event_blocks = commentary_main.find_all("div", recursive=False)
+        
+        if not event_blocks:
             return
-
-        flex_row = first_wrapper.find(
+        
+        # IMPORTANT LOGIC:
+        # if over has decimal → use first block
+        # if over is integer → use second block (skip summary)
+        
+        if "." in overs:
+            target_block = event_blocks[0]
+        else:
+            if len(event_blocks) > 1:
+                target_block = event_blocks[1]
+            else:
+                target_block = event_blocks[0]
+        
+        flex_row = target_block.find(
             "div",
             class_=lambda x: x and "flex" in x and "gap-4" in x
         )
-
+        
         if not flex_row:
             print(f"No flex row found for {match_name}")
             return
-
+        
         event_divs = flex_row.find_all("div", recursive=False)
-
+        
         if len(event_divs) < 2:
             print(f"No event div found for {match_name}")
             return
-
+        
         event_text = event_divs[1].get_text(strip=True)
-
 
         # =========================
         # PREVENT DUPLICATES
