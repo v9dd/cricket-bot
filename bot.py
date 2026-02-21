@@ -16,7 +16,68 @@ HEADERS = {
 
 # store last event per match
 last_events = {}
+def fetch_toss_update(match_url, match_name):
 
+    try:
+
+        # Convert to scorecard URL
+        scorecard_url = match_url.replace(
+            "live-cricket-scores",
+            "live-cricket-scorecard"
+        )
+
+        response = requests.get(scorecard_url, headers=HEADERS, timeout=15)
+
+        if response.status_code != 200:
+            print(f"Failed to fetch scorecard for {match_name}")
+            return
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Find Toss label
+        toss_label = soup.find(
+            "div",
+            class_="font-bold",
+            string="Toss"
+        )
+
+        if not toss_label:
+            print(f"Toss not found yet for {match_name}")
+            return
+
+        # Get next div containing toss text
+        toss_text_div = toss_label.find_next("div")
+
+        if not toss_text_div:
+            return
+
+        toss_text = toss_text_div.get_text(strip=True)
+
+        # prevent duplicates
+        if match_url in match_state and match_state[match_url].get("toss_sent"):
+            return
+
+        if match_url not in match_state:
+            match_state[match_url] = {}
+
+        match_state[match_url]["toss_sent"] = True
+
+        timestamp = datetime.now().strftime("%H:%M")
+
+        message = (
+            f"🪙 TOSS UPDATE 🪙\n\n"
+            f"{match_name}\n\n"
+            f"{toss_text}\n\n"
+            f"🕒 {timestamp}\n"
+            f"🔗 {match_url}"
+        )
+
+        print(message)
+
+        send_message(message)
+
+    except Exception as e:
+        print(f"Toss fetch error for {match_name}: {e}")
 
 def send_message(text):
 
@@ -236,7 +297,7 @@ def main():
             matches = scrape_match_links()
 
             for match_name, match_link in matches:
-
+                fetch_toss_update(match_link, match_name)
                 fetch_match_update(match_link, match_name)
 
         except Exception as e:
