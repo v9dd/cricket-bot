@@ -13,26 +13,42 @@ CHAT_ID = os.getenv("CHAT_ID")
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
-
+# match state for toss event
+match_state = {}
 # store last event per match
 last_events = {}
 def fetch_toss_update(match_url, match_name):
 
+    # initialize match state if not exists
+    if match_url not in match_state:
+        match_state[match_url] = {
+            "toss_sent": False
+        }
+
+    # STOP if toss already sent
+    if match_state[match_url]["toss_sent"]:
+        return
+
+
     scorecard_url = match_url.replace(
         "live-cricket-scores",
         "live-cricket-scorecard"
+    ).replace(
+        "www.cricbuzz.com",
+        "m.cricbuzz.com"
     )
 
-    print("Fetching toss:", scorecard_url)
 
     try:
 
-        response = requests.get(scorecard_url, headers=HEADERS, timeout=20)
+        response = requests.get(scorecard_url, headers=HEADERS, timeout=15)
 
-        print("Status:", response.status_code)
-        print("HTML size:", len(response.text))
+        if response.status_code != 200:
+            return
+
 
         soup = BeautifulSoup(response.text, "html.parser")
+
 
         toss_label = soup.find(
             lambda tag: tag.name == "div"
@@ -40,13 +56,17 @@ def fetch_toss_update(match_url, match_name):
             and "Toss" in tag.get_text()
         )
 
+
         if not toss_label:
-            print("Toss not found")
             return
+
 
         toss_text = toss_label.find_next("div").get_text(strip=True)
 
-        print("Toss:", toss_text)
+
+        # MARK AS SENT BEFORE sending
+        match_state[match_url]["toss_sent"] = True
+
 
         message = (
             f"🪙 TOSS UPDATE 🪙\n\n"
@@ -55,10 +75,14 @@ def fetch_toss_update(match_url, match_name):
             f"🔗 {match_url}"
         )
 
+
+        print("Sending toss update:", match_name)
+
         send_message(message)
 
+
     except Exception as e:
-        print("Error:", e)
+        print("Toss error:", e)
 
 def send_message(text):
 
