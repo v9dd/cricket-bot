@@ -1,160 +1,249 @@
 import requests
-import time
 import os
-import re
+import time
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from datetime import datetime
 
-print("Bot is starting (Global Mode with News)...")
+load_dotenv()
 
-# Load Telegram credentials from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Track already sent updates across all matches
-sent_updates = set()
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
+
+# store last event per match
+last_events = {}
+
 
 def send_message(text):
-    if not BOT_TOKEN or not CHAT_ID:
-        print("Error: BOT_TOKEN or CHAT_ID not set")
-        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text
+    }
 
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        data = {"chat_id": CHAT_ID, "text": text}
-        requests.post(url, data=data, timeout=10)
+        requests.post(url, data=payload, timeout=10)
     except Exception as e:
-        print("Telegram send error:", e)
+        print("Telegram error:", e)
 
-def get_latest_news():
-    """Fetches the latest news headline from Cricbuzz."""
-    try:
-        url = "https://www.cricbuzz.com/cricket-news"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            return None
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        # Cricbuzz news structure usually has headers in h2 or h3 within cb-col-67
-        news_item = soup.find('a', class_='cb-nws-hdln-ancr')
-        if news_item:
-            headline = news_item.get_text(strip=True)
-            link = "https://www.cricbuzz.com" + news_item['href']
-            # Also try to get intro text
-            intro = news_item.find_next('div', class_='cb-nws-intr')
-            intro_text = intro.get_text(strip=True) if intro else ""
-            return f"📰 Latest News: {headline}\n\n{intro_text}\n\nRead more: {link}"
+# get latest score (runs-wickets overs)
+def get_score_and_over(soup):
+
+    score_div = soup.find(
+        "div",
+        class_=lambda x: x and "text-3xl" in x and "font-bold" in x
+    )
+
+    if not score_div:
+        return None, None
+
+    runs = score_div.find_all("div")[0].get_text(strip=True)
+
+    wickets = score_div.find_all("div")[1].get_text(strip=True).replace("-", "")
+
+    overs = score_div.find_all("div")[2].get_text(strip=True)
+
+    overs = overs.replace("(", "").replace(")", "")
+
+    score = f"{runs}-{wickets}"
+
+    return score, overs
+
+
+# get latest ball event
+def get_latest_event(soup):
+
+    main = soup.find("div", class_=lambda x: x and "mb-2" in x)
+
+    if not main:
         return None
-    except Exception as e:
-        print("Error fetching news:", e)
+
+    first_row = main.find("div", recursive=False)
+
+    if not first_row:
         return None
 
-def get_live_matches():
-    """Fetches currently live matches from Cricbuzz."""
-    try:
-        url = "https://www.cricbuzz.com/cricket-match/live-scores"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            return []
+    event = first_row.get_text(strip=True)
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        links = soup.find_all('a', href=re.compile(r'/live-cricket-scores/\d+/'))
-        
-        match_ids = []
-        for link in links:
-            match = re.search(r'/live-cricket-scores/(\d+)/', link['href'])
-            if match:
-                match_ids.append(match.group(1))
-        
-        return list(set(match_ids))
+    return event
+
+
+# fetch latest data from match link
+def fetch_match_update(match_url, match_name):
+
+    try:
+        response = requests.get(match_url, headers=HEADERS, timeout=15)
+
+        if response.status_code != 200:
+            print(f"Failed to fetch {match_name}")
+            return
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+
+        # =========================
+        # GET SCORE AND CURRENT OVER
+        # =========================
+
+        score_div = soup.find(
+            "div",
+            class_=lambda x: x and "text-3xl" in x and "font-bold" in x
+        )
+
+        if not score_div:
+            print(f"Score not found for {match_name}")
+            return
+
+        score_parts = score_div.find_all("div")
+
+        runs = score_parts[0].get_text(strip=True)
+
+        wickets = score_parts[1].get_text(strip=True).replace("-", "")
+
+        overs = score_parts[2].get_text(strip=True)
+        overs = overs.replace("(", "").replace(")", "")
+
+        score = f"{runs}-{wickets}"
+
+
+        # =========================
+        # GET LATEST EVENT (YOUR EXACT STRUCTURE)
+        # =========================
+
+        commentary_main = soup.find(
+            "div",
+            class_=lambda x: x and "leading-6" in x
+        )
+
+        if not commentary_main:
+            print(f"No commentary container found for {match_name}")
+            return
+
+        first_wrapper = commentary_main.find("div", recursive=False)
+
+        if not first_wrapper:
+            print(f"No first wrapper found for {match_name}")
+            return
+
+        flex_row = first_wrapper.find(
+            "div",
+            class_=lambda x: x and "flex" in x and "gap-4" in x
+        )
+
+        if not flex_row:
+            print(f"No flex row found for {match_name}")
+            return
+
+        event_divs = flex_row.find_all("div", recursive=False)
+
+        if len(event_divs) < 2:
+            print(f"No event div found for {match_name}")
+            return
+
+        event_text = event_divs[1].get_text(strip=True)
+
+
+        # =========================
+        # PREVENT DUPLICATES
+        # =========================
+
+        unique_id = f"{match_url}_{score}_{event_text}"
+
+        if match_url in last_events and last_events[match_url] == unique_id:
+            return
+
+        last_events[match_url] = unique_id
+
+
+        # =========================
+        # TIMESTAMP
+        # =========================
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+
+        # =========================
+        # MESSAGE FORMAT
+        # =========================
+
+        message = (
+            f"🏏 {match_name}\n\n"
+            f"📊 Score: {score} ({overs})\n"
+            f"🔥 Event: {event_text}\n\n"
+            f"🕒 {timestamp}\n"
+            f"🔗 {match_url}"
+        )
+
+
+        print("\nSending update:")
+        print(message)
+        print("--------------------------------------------------")
+
+
+        send_message(message)
+
+
     except Exception as e:
-        print("Error fetching live matches:", e)
-        return []
+        print(f"Error fetching match update for {match_name}: {e}")
+# scrape match links from Cricbuzz live scores page
+def scrape_match_links():
 
-def get_match_commentary(match_id):
-    """Fetches commentary for a specific match ID."""
-    try:
-        url = f"https://www.cricbuzz.com/live-cricket-scores/{match_id}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            return [], "Unknown Match"
+    url = "https://www.cricbuzz.com/cricket-match/live-scores"
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Get Match Name
-        title_tag = soup.find('h1', class_='cb-nav-hdr')
-        match_name = title_tag.get_text(strip=True).replace('Commentary', '').strip() if title_tag else f"Match {match_id}"
-        
-        results = []
-        items = soup.find_all(['div', 'p', 'span'], class_=re.compile('cb-comm-item|cb-com-ln|cb-col-100|cb-ovr-num'))
-        
-        for item in items:
-            text = item.get_text(separator=' ', strip=True)
-            if not text or len(text) < 20:
+    response = requests.get(url, headers=HEADERS)
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    main_container = soup.find("div", class_="flex flex-col gap-2")
+
+    matches = []
+
+    blocks = main_container.find_all("div", recursive=False)
+
+    for block in blocks:
+
+        cards = block.select("a.w-full.bg-cbWhite")
+
+        for card in cards:
+
+            name = card.get("title", "").strip()
+
+            if not name:
                 continue
-            
-            # Create a unique ID combining match and text
-            item_id = f"{match_id}_{hash(text)}"
-            results.append({"id": item_id, "text": text})
 
-        return results, match_name
-    except Exception as e:
-        print(f"Error scraping match {match_id}:", e)
-        return [], "Error"
+            link = "https://www.cricbuzz.com" + card["href"]
+
+            matches.append((name, link))
+
+    return matches
+
 
 def main():
-    print("Fetching initial data...")
-    
-    # Send latest news on start
-    news = get_latest_news()
-    if news:
-        send_message(news)
-        print("Sent latest news on startup.")
-    
-    # Initialize with current match data to avoid spamming history
-    live_matches = get_live_matches()
-    for m_id in live_matches:
-        updates, _ = get_match_commentary(m_id)
-        for u in updates:
-            sent_updates.add(u["id"])
-    print(f"Initialized with {len(live_matches)} matches and {len(sent_updates)} history items.")
+
+    print("Live match bot started...")
 
     while True:
-        try:
-            live_matches = get_live_matches()
-            if not live_matches:
-                print("No live matches found currently.")
-            
-            for m_id in live_matches:
-                updates, match_name = get_match_commentary(m_id)
-                
-                new_updates = 0
-                for update in reversed(updates):
-                    if update["id"] not in sent_updates:
-                        message = f"🏏 {match_name}\n\n{update['text']}"
-                        send_message(message)
-                        sent_updates.add(update["id"])
-                        new_updates += 1
-                
-                if new_updates > 0:
-                    print(f"Sent {new_updates} new updates for {match_name}.")
 
-            # Memory management
-            if len(sent_updates) > 3000:
-                sent_updates.clear()
+        try:
+
+            matches = scrape_match_links()
+
+            for match_name, match_link in matches:
+
+                fetch_match_update(match_link, match_name)
 
         except Exception as e:
-            print("Main loop error:", e)
+            print("Error:", e)
 
-        time.sleep(60)
+        time.sleep(15)   # interval in seconds
+
 
 if __name__ == "__main__":
     main()
