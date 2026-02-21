@@ -210,7 +210,7 @@ def fetch_match_update(match_url, match_name):
             target_block = event_blocks[0]
         else:
             if len(event_blocks) > 1:
-                target_block = event_blocks[1]
+                target_block = event_blocks[2]
             else:
                 target_block = event_blocks[0]
         
