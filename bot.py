@@ -1,330 +1,123 @@
-import requests
 import os
 import time
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
+import sqlite3
+import requests
+import google.generativeai as genai
 from datetime import datetime
+from dotenv import load_dotenv
 
+# 1. Load Environment Variables (Railway handles this automatically)
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+RAPID_API_KEY = os.getenv("RAPID_API_KEY")
+RAPID_HOST = "cricbuzz-cricket.p.rapidapi.com"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
-# match state for toss event
-match_state = {}
-# store last event per match
-last_events = {}
-def fetch_toss_update(match_url, match_name):
+# 2. Setup Gemini AI
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-    # initialize match state if not exists
-    if match_url not in match_state:
-        match_state[match_url] = {
-            "toss_sent": False
-        }
+# 3. Database Setup (Persists safely on Railway)
+conn = sqlite3.connect("cricket.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
+cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, toss_done INTEGER DEFAULT 0)")
+conn.commit()
 
-    # STOP if toss already sent
-    if match_state[match_url]["toss_sent"]:
-        return
-
-
-    scorecard_url = match_url.replace(
-        "live-cricket-scores",
-        "live-cricket-scorecard"
-    ).replace(
-        "www.cricbuzz.com",
-        "m.cricbuzz.com"
-    )
-
-
-    try:
-
-        response = requests.get(scorecard_url, headers=HEADERS, timeout=15)
-
-        if response.status_code != 200:
-            return
-
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-
-        toss_label = soup.find(
-            lambda tag: tag.name == "div"
-            and "font-bold" in tag.get("class", [])
-            and "Toss" in tag.get_text()
-        )
-
-
-        if not toss_label:
-            return
-
-
-        toss_text = toss_label.find_next("div").get_text(strip=True)
-
-
-        # MARK AS SENT BEFORE sending
-        match_state[match_url]["toss_sent"] = True
-
-
-        message = (
-            f"🪙 TOSS UPDATE 🪙\n\n"
-            f"{match_name}\n\n"
-            f"{toss_text}\n\n"
-            f"🔗 {match_url}"
-        )
-
-
-        print("Sending toss update:", match_name)
-
-        send_message(message)
-
-
-    except Exception as e:
-        print("Toss error:", e)
-
-def send_message(text):
-
+def send_telegram(text):
+    if not text: return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text
-    }
-
     try:
-        requests.post(url, data=payload, timeout=10)
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
     except Exception as e:
-        print("Telegram error:", e)
+        print(f"Telegram Error: {e}")
 
-
-# get latest score (runs-wickets overs)
-def get_score_and_over(soup):
-
-    score_div = soup.find(
-        "div",
-        class_=lambda x: x and "text-3xl" in x and "font-bold" in x
-    )
-
-    if not score_div:
-        return None, None
-
-    runs = score_div.find_all("div")[0].get_text(strip=True)
-
-    wickets = score_div.find_all("div")[1].get_text(strip=True).replace("-", "")
-
-    overs = score_div.find_all("div")[2].get_text(strip=True)
-
-    overs = overs.replace("(", "").replace(")", "")
-
-    score = f"{runs}-{wickets}"
-
-    return score, overs
-
-
-# get latest ball event
-def get_latest_event(soup):
-
-    main = soup.find("div", class_=lambda x: x and "mb-2" in x)
-
-    if not main:
-        return None
-
-    first_row = main.find("div", recursive=False)
-
-    if not first_row:
-        return None
-
-    event = first_row.get_text(strip=True)
-
-    return event
-
-
-# fetch latest data from match link
-def fetch_match_update(match_url, match_name):
-
+def get_ai_news(prompt):
     try:
-        response = requests.get(match_url, headers=HEADERS, timeout=15)
+        res = model.generate_content(f"Format this as professional cricket news for WhatsApp: {prompt}")
+        return res.text.strip()
+    except: return None
 
-        if response.status_code != 200:
-            print(f"Failed to fetch {match_name}")
-            return
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-
-        # =========================
-        # GET SCORE AND CURRENT OVER
-        # =========================
-
-        score_div = soup.find(
-            "div",
-            class_=lambda x: x and "text-3xl" in x and "font-bold" in x
-        )
-
-        if not score_div:
-            print(f"Score not found for {match_name}")
-            return
-
-        score_parts = score_div.find_all("div")
-
-        runs = score_parts[0].get_text(strip=True)
-
-        wickets = score_parts[1].get_text(strip=True).replace("-", "")
-
-        overs = score_parts[2].get_text(strip=True)
-        overs = overs.replace("(", "").replace(")", "")
-
-        score = f"{runs}-{wickets}"
-
-
-        # =========================
-        # GET LATEST EVENT (YOUR EXACT STRUCTURE)
-        # =========================
-
-# =========================
-# GET LATEST EVENT (HANDLE OVER SUMMARY CASE)
-# =========================
-
-        commentary_main = soup.find(
-            "div",
-            class_=lambda x: x and "leading-6" in x
-        )
+def process_matches():
+    url = f"https://{RAPID_HOST}/matches/v1/live"
+    headers = {"X-RapidAPI-Key": RAPID_API_KEY, "X-RapidAPI-Host": RAPID_HOST}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=15).json()
+        # Strictly look for International matches
+        intl = [s for s in res.get('typeMatches', []) if s.get('matchType') == 'intl']
         
-        if not commentary_main:
-            print(f"No commentary container found for {match_name}")
-            return
-        
-        # get all direct event blocks
-        event_blocks = commentary_main.find_all("div", recursive=False)
-        
-        if not event_blocks:
-            return
-        
-        # IMPORTANT LOGIC:
-        # if over has decimal → use first block
-        # if over is integer → use second block (skip summary)
-        
-        if "." in overs:
-            target_block = event_blocks[0]
-        else:
-            if len(event_blocks) > 1:
-                target_block = event_blocks[1]
-            else:
-                target_block = event_blocks[0]
-        
-        flex_row = target_block.find(
-            "div",
-            class_=lambda x: x and "flex" in x and "gap-4" in x
-        )
-        
-        if not flex_row:
-            print(f"No flex row found for {match_name}")
-            return
-        
-        event_divs = flex_row.find_all("div", recursive=False)
-        
-        if len(event_divs) < 2:
-            print(f"No event div found for {match_name}")
-            return
-        
-        event_text = event_divs[1].get_text(strip=True)
-
-        # =========================
-        # PREVENT DUPLICATES
-        # =========================
-
-        unique_id = f"{match_url}_{score}_{event_text}"
-
-        if match_url in last_events and last_events[match_url] == unique_id:
-            return
-
-        last_events[match_url] = unique_id
-
-
-        # =========================
-        # TIMESTAMP
-        # =========================
-
-        timestamp = datetime.now().strftime("%H:%M:%S")
-
-
-        # =========================
-        # MESSAGE FORMAT
-        # =========================
-
-        message = (
-            f"🏏 {match_name}\n\n"
-            f"📊 Score: {score} ({overs})\n"
-            f"🔥 Event: {event_text}\n\n"
-            f"🕒 {timestamp}\n"
-            f"🔗 {match_url}"
-        )
-
-
-        print("\nSending update:")
-        print(message)
-        print("--------------------------------------------------")
-
-
-        send_message(message)
-
-
+        for section in intl:
+            for match in section.get('seriesMatches', []):
+                m = match.get('seriesAdWrapper', {}).get('matchScoreDetails', {})
+                if not m: continue
+                
+                m_id = str(m['matchId'])
+                m_name = f"{m['team1ShortName']} vs {m['team2ShortName']}"
+                
+                process_single_match(m_id, m_name)
     except Exception as e:
-        print(f"Error fetching match update for {match_name}: {e}")
-# scrape match links from Cricbuzz live scores page
-def scrape_match_links():
+        print(f"Fetch Error: {e}")
 
-    url = "https://www.cricbuzz.com/cricket-match/live-scores"
+def process_single_match(m_id, m_name):
+    # Fetch miniscore and commentary
+    url = f"https://{RAPID_HOST}/mcenter/v1/{m_id}/comm"
+    headers = {"X-RapidAPI-Key": RAPID_API_KEY, "X-RapidAPI-Host": RAPID_HOST}
+    
+    try:
+        data = requests.get(url, headers=headers, timeout=15).json()
+        score_info = data.get('miniscore', {})
+        cur_overs = float(score_info.get('overs', 0))
+        cur_score = f"{score_info.get('batTeamScore', '0')}/{score_info.get('batTeamWkts', '0')}"
+        
+        row = cursor.execute("SELECT last_over, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
+        last_over, toss_done = (row[0], row[1]) if row else (0.0, 0)
 
-    response = requests.get(url, headers=HEADERS)
+        # 1. Toss Logic
+        if not toss_done:
+            status = score_info.get('matchHeader', {}).get('status', "")
+            if "won the toss" in status.lower():
+                eid = f"{m_id}_TOSS"
+                if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                    msg = get_ai_news(f"TOSS: {m_name}. {status}")
+                    send_telegram(msg)
+                    cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+                    toss_done = 1
 
-    soup = BeautifulSoup(response.text, "html.parser")
+        # 2. Over Milestones (10, 20, 30)
+        if int(cur_overs // 10) > int(last_over // 10) and cur_overs >= 10:
+            m_stone = int((cur_overs // 10) * 10)
+            eid = f"{m_id}_O_{m_stone}"
+            if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                msg = get_ai_news(f"{m_stone} OVER UPDATE: {m_name} is {cur_score} after {cur_overs} overs.")
+                send_telegram(msg)
+                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-    main_container = soup.find("div", class_="flex flex-col gap-2")
+        # 3. Commentary Milestones (50s / 100s)
+        for comm in data.get('commentaryList', [])[:5]:
+            comm_text = comm.get('commText', "")
+            event_type = None
+            if "reach" in comm_text.lower() and "50" in comm_text: event_type = "50"
+            elif "reach" in comm_text.lower() and "100" in comm_text: event_type = "100"
 
-    matches = []
+            if event_type:
+                eid = f"{m_id}_{event_type}_{hash(comm_text)}"
+                if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                    msg = get_ai_news(f"Milestone: Player reached {event_type} in {m_name}. Score: {cur_score}. Info: {comm_text}")
+                    send_telegram(msg)
+                    cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-    blocks = main_container.find_all("div", recursive=False)
-
-    for block in blocks:
-
-        cards = block.select("a.w-full.bg-cbWhite")
-
-        for card in cards:
-
-            name = card.get("title", "").strip()
-
-            if not name:
-                continue
-
-            link = "https://www.cricbuzz.com" + card["href"]
-
-            matches.append((name, link))
-
-    return matches
-
-
-def main():
-
-    print("Live match bot started...")
-
-    while True:
-
-        try:
-
-            matches = scrape_match_links()
-
-            for match_name, match_link in matches:
-                fetch_toss_update(match_link, match_name)
-                fetch_match_update(match_link, match_name)
-
-        except Exception as e:
-            print("Error:", e)
-
-        time.sleep(15)   # interval in seconds
-
+        # Update State
+        cursor.execute("INSERT OR REPLACE INTO state VALUES (?,?,?)", (m_id, cur_overs, toss_done))
+        conn.commit()
+    except Exception as e:
+        pass
 
 if __name__ == "__main__":
-    main()
+    print("🚀 Cricket Newsroom Worker Starting...")
+    send_telegram("✅ Cricket Newsroom Bot is now online and monitoring matches!")
+    while True:
+        process_matches()
+        time.sleep(30) # Efficient polling for your 1000/hr limit
