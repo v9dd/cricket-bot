@@ -1,35 +1,85 @@
 import requests
-from bs4 import BeautifulSoup
 import time
 import os
+
+print("Bot is starting...")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+MATCH_ID = "133633"
+
 sent = set()
 
-def send_message(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": msg}
-    requests.post(url, data=data)
+def send_message(text):
 
-def get_scores():
-    url = "https://www.cricbuzz.com/live-cricket-scores"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    print("Sending message:", text)
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    data = {
+        "chat_id": CHAT_ID,
+        "text": text
+    }
+
+    r = requests.post(url, data=data)
+
+    print("Telegram response:", r.text)
+
+
+def get_commentary():
+
+    print("Fetching commentary...")
+
+    url = f"https://www.cricbuzz.com/api/cricket-match/commentary/{MATCH_ID}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.cricbuzz.com/"
+    }
+
     r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, "html.parser")
-    matches = soup.find_all("div", class_="cb-mtch-lst")
-    return [m.get_text(" ", strip=True) for m in matches]
+
+    print("Cricbuzz response code:", r.status_code)
+
+    if r.status_code != 200:
+        return []
+
+    data = r.json()
+
+    if "commentaryList" not in data:
+        print("No commentary found")
+        return []
+
+    return data["commentaryList"]
+
 
 while True:
-    try:
-        scores = get_scores()
-        for score in scores:
-            if score not in sent:
-                send_message(f"🏏 LIVE UPDATE\n\n{score}")
-                sent.add(score)
-                print("Sent:", score)
-    except Exception as e:
-        print(e)
 
-    time.sleep(15)
+    print("Loop running...")
+
+    try:
+
+        balls = get_commentary()
+
+        for ball in balls:
+
+            if "commText" in ball and "timestamp" in ball:
+
+                ball_id = str(ball["timestamp"])
+
+                if ball_id not in sent:
+
+                    text = ball.get("commText", "")
+
+                    message = f"🏏 VIC vs WA\n\n{text}"
+
+                    send_message(message)
+
+                    sent.add(ball_id)
+
+    except Exception as e:
+
+        print("ERROR:", e)
+
+    time.sleep(10)
