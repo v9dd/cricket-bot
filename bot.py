@@ -18,66 +18,47 @@ HEADERS = {
 last_events = {}
 def fetch_toss_update(match_url, match_name):
 
+    scorecard_url = match_url.replace(
+        "live-cricket-scores",
+        "live-cricket-scorecard"
+    )
+
+    print("Fetching toss:", scorecard_url)
+
     try:
 
-        # Convert to scorecard URL
-        scorecard_url = match_url.replace(
-            "live-cricket-scores",
-            "live-cricket-scorecard"
-        )
+        response = requests.get(scorecard_url, headers=HEADERS, timeout=20)
 
-        response = requests.get(scorecard_url, headers=HEADERS, timeout=15)
-
-        if response.status_code != 200:
-            print(f"Failed to fetch scorecard for {match_name}")
-            return
+        print("Status:", response.status_code)
+        print("HTML size:", len(response.text))
 
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # Find Toss label
         toss_label = soup.find(
-            "div",
-            class_="font-bold",
-            string="Toss"
+            lambda tag: tag.name == "div"
+            and "font-bold" in tag.get("class", [])
+            and "Toss" in tag.get_text()
         )
 
         if not toss_label:
-            print(f"Toss not found yet for {match_name}")
+            print("Toss not found")
             return
 
-        # Get next div containing toss text
-        toss_text_div = toss_label.find_next("div")
+        toss_text = toss_label.find_next("div").get_text(strip=True)
 
-        if not toss_text_div:
-            return
-
-        toss_text = toss_text_div.get_text(strip=True)
-
-        # prevent duplicates
-        if match_url in match_state and match_state[match_url].get("toss_sent"):
-            return
-
-        if match_url not in match_state:
-            match_state[match_url] = {}
-
-        match_state[match_url]["toss_sent"] = True
-
-        timestamp = datetime.now().strftime("%H:%M")
+        print("Toss:", toss_text)
 
         message = (
             f"🪙 TOSS UPDATE 🪙\n\n"
             f"{match_name}\n\n"
             f"{toss_text}\n\n"
-            f"🕒 {timestamp}\n"
             f"🔗 {match_url}"
         )
-
-        print(message)
 
         send_message(message)
 
     except Exception as e:
-        print(f"Toss fetch error for {match_name}: {e}")
+        print("Error:", e)
 
 def send_message(text):
 
