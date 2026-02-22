@@ -11,7 +11,7 @@ from datetime import datetime
 # =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") # Ensure this is in your Railway/Environment variables
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") 
 
 if not BOT_TOKEN:
     print("🚨 SYSTEM HALTED: Missing Telegram Token!")
@@ -35,7 +35,7 @@ match_state = {}
 last_update_id = None
 
 # =====================
-# AI EDITOR (ULTRA-SHORT CRISP NARRATIVE)
+# AI EDITOR (GOLDILOCKS NARRATIVE)
 # =====================
 def get_pro_edit(text):
     if not GROQ_API_KEY: return None
@@ -43,36 +43,34 @@ def get_pro_edit(text):
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
     prompt = f"""You are a professional Cricket News Editor for a viral WhatsApp Channel.
-Rewrite the raw match update into an EXTREMELY short, crisp, narrative-style post. Do NOT use bullet points or lists. 
+Rewrite the raw match update into a crisp, narrative-style post that mirrors the exact length and depth of these examples.
 
-Follow this EXACT format, tone, and LENGTH based on these examples. Do not make it longer than these:
-
-Example 1:
+Example 1 (Toss):
 🏏 TOSS UPDATE – ENG vs SL 🏏 
 Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
-A massive game in Group 2 to kick off the business end. Game on! 
+A massive game in Group 2 to kick off the business end. Game on!
 
-Example 2:
+Example 2 (Match Update):
 🏏 10 OVER UPDATE – ENG vs SL 🏏 
-England find themselves in a tough spot, reaching 68/4 after 10 overs.
-The batting team is trying to build a fightback, but the bowlers have dominated the phase with crucial wickets.
+England find themselves in a tough spot, reaching 68/4 after 10 overs in their Super 8 opener.
+Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark.
 
 Rules for your rewrite:
-1. STRICT LENGTH LIMIT: The text below the heading MUST be no more than 2 to 3 very short sentences. Do not exceed 40-50 words in total.
-2. NO FILLER: Cut out unnecessary words, deep analysis, or long context. Stick only to the punchy, immediate news.
-3. ONE HEADING: Create ONE clear heading with emojis (e.g., 🏏 [PHASE/EVENT] – [MATCH NAME] 🏏).
-4. CRISP WEAVING: Weave the score smoothly into the sentences. DO NOT use rigid labels like "Score: X" or "Overs: Y".
-5. NO BULLET POINTS: Strictly no lists or numbered stats.
+1. MATCH THE EXAMPLES: Provide exactly 2 short, punchy paragraphs. Not one sentence, not four paragraphs.
+2. NARRATIVE FLOW: Weave the score, wickets, and key players into the sentences. Avoid bullet points or "Label: Value" formatting.
+3. HEADING: Use ONE clear heading: 🏏 [EVENT] – [TEAMS] 🏏
+4. INFORMATION DENSITY: Mention the match context if available in the raw data to add weight to the news.
+5. NO BULLET POINTS: Strictly paragraph format only.
 
-RAW UPDATE DATA to rewrite:
+RAW UPDATE DATA:
 {text}
 """
     
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.4, # Lowered to enforce strict adherence to constraints
-        "max_tokens": 150   # Physically blocks the AI from writing long paragraphs
+        "temperature": 0.5, 
+        "max_tokens": 300   
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=10)
@@ -88,12 +86,12 @@ def send_telegram(text, pro_edit=False):
     if not text: return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     
-    # 1. Send the instant raw template (Safety Net)
+    # Send Original Raw Template (The Fail-Safe)
     try:
         requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": "true"}, timeout=10)
     except: pass
 
-    # 2. If requested, fetch and send the AI version
+    # If pro_edit is True, ask Groq AI to rewrite it and send as a follow-up
     if pro_edit and GROQ_API_KEY:
         ai_text = get_pro_edit(text)
         if ai_text:
@@ -105,12 +103,14 @@ def get_img_link(query):
     safe_query = urllib.parse.quote(f"{query} Cricket Match {datetime.now().year}")
     return f"https://www.google.com/search?q={safe_query}&tbm=isch"
 
-def is_intl(text):
-    t = text.upper()
-    if any(x in t for x in ["WOMEN", " U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A"]): return False
-    if any(f in t for f in ["TEST", "ODI", "T20I", "WORLD CUP"]): return True
+def is_international_text_check(text):
+    title = text.upper()
+    if any(x in title for x in ["WOMEN", " U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A", "ENGLAND LIONS"]): return False
+    intl_formats = ["TEST", "ODI", "T20I", "WORLD CUP"]
+    if any(fmt in title for fmt in intl_formats): return True
     countries = ["INDIA", "AUSTRALIA", "ENGLAND", "NEW ZEALAND", "SOUTH AFRICA", "PAKISTAN", "SRI LANKA", "WEST INDIES", "BANGLADESH", "ZIMBABWE", "AFGHANISTAN", "IRELAND"]
-    return sum(1 for c in countries if c in t) >= 2
+    if sum(1 for c in countries if c in title) >= 2: return True
+    return False
 
 # =====================
 # DAILY BRIEFING FEATURE
@@ -135,7 +135,7 @@ def scrape_todays_schedule():
             
             for match in match_list.find_all("div", class_="cb-ovr-flo"):
                 match_info = match.get_text(strip=True)
-                if is_intl(match_info):
+                if is_international_text_check(match_info):
                     todays_matches.append(f"• {match_info}")
         
         if not todays_matches:
@@ -230,7 +230,7 @@ def handle_commands():
     except: pass
 
 # =====================
-# SCRAPING ENGINE
+# SCRAPING ENGINE & CORE LOGIC
 # =====================
 def scrape_match_links():
     try:
@@ -299,6 +299,8 @@ def fetch_toss_update(match_url, match_name):
         match_state[match_url]["toss_sent"] = True
         
         msg = f"🪙 *TOSS UPDATE* 🪙\n—————————————————\n🏆 *{match_name}*\n\n🏟 *{toss_text}*\n\n🖼 [Tap for Toss Photos]({get_img_link(match_name + ' Toss')})\n—————————————————\n🏏 _Match starting soon! Get ready!_"
+        
+        # Enable Pro Edit for Toss
         send_telegram(msg, pro_edit=True)
     except: pass
 
@@ -333,6 +335,7 @@ def fetch_match_update(match_url, match_name):
         row = cursor.execute("SELECT last_over, last_wickets, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
         last_ov, last_wk, toss_done = row if row else (0.0, 0, 0)
         
+        # Reset tracking logic for 2nd Innings
         if cur_overs < last_ov - 5: 
             last_ov = 0.0
             last_wk = 0
@@ -354,7 +357,7 @@ def fetch_match_update(match_url, match_name):
                 msg = f"🛑 *INNINGS COMPLETED* 🛑\n—————————————————\n🏏 *{match_name}* finishes their innings.\n\n📊 *FINAL SCORE:* *{score_display}*\n🎯 *UPDATE:* _{event_text}_\n\n🖼 [Tap for Match Gallery]({get_img_link(match_name)})\n—————————————————\n🕒 _Second innings starts shortly. Who's winning this?_"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 3. SMART OVER MILESTONES
+        # 3. SMART OVER MILESTONES (T20 vs ODI/Test Logic)
         else:
             is_t20 = "T20" in match_name.upper()
             milestones = [6, 10, 15, 20] if is_t20 else [10, 20, 30, 40, 50, 60, 70, 80, 90]
@@ -391,33 +394,42 @@ def fetch_match_update(match_url, match_name):
                 msg = f"🔥 *{event_type} REACHED!* 🔥\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *A brilliant innings! Share the news!*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # Fire notification with Pro Edit enabled!
+        # Send Telegram notification (With Pro Edit Enabled!)
         if msg: send_telegram(msg, pro_edit=True)
         
+        # Save exact state to DB
         cursor.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", (m_id, cur_overs, wickets, toss_done))
         conn.commit()
     except: pass
 
 if __name__ == "__main__":
-    print("🚀 WhatsApp Editor Bot + Groq Llama-3.3-70B Active!")
-    send_telegram("✅ *Content Assistant Online!*\nUltra-short AI Edits, Smart T20 Logic, and Image Fetching are fully ACTIVE.")
+    print("🚀 WhatsApp Content Assistant & Narrative AI Engine Starting...")
+    send_telegram("✅ *Content Assistant Online!*\n- Tracking Commands Active (/tracklist, /track)\n- AI Editor (Narrative Style) Active\n- Dynamic Image Links Active")
+    
     while True:
         try:
+            # Check Telegram for /track, /stop, /score, /tracklist commands
             handle_commands()
+            
+            # Check if it's 8:00 AM for the Daily Briefing
             handle_daily_briefing()
             
+            # Scrape live matches
             matches = scrape_match_links()
             for name, link in matches:
                 m_id = link.split("/")[-2]
                 
-                # Check Tracking Config
+                # Check if this specific match is muted in tracking_config
                 row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
                 if row and row[0] == 0:
-                    continue 
+                    continue # Skip checking this match if the user used /stop
                 
+                # Run the updates
                 fetch_toss_update(link, name)
                 fetch_match_update(link, name)
                 
         except Exception as e:
-            print("Loop Error:", e)
+            print("Main Loop Error:", e)
+        
+        # Loop delay
         time.sleep(15)
