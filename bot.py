@@ -41,50 +41,43 @@ conn.commit()
 match_state = {}
 last_update_id = None
 
-# =====================
-# THE FINAL AI ENGINE (MIRROR STYLE)
-# =====================
 def get_pro_edit(text):
     if not GROQ_API_KEY: return None
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
-    prompt = f"""You are a professional Cricket News Editor for a WhatsApp channel.
-Rewrite the raw match data into a CRISP NARRATIVE post.
+    # TOKEN SAVER 1: Only send the core 350 characters of match data
+    # (The AI doesn't need the whole page to know the score/event)
+    clean_data = text[:350]
 
-YOUR OUTPUT MUST EXACTLY MATCH THE LENGTH, TONE, AND FORMAT OF THESE EXAMPLES. Do not make it shorter like a tweet. Do not make it a long essay.
+    # TOKEN SAVER 2: "Skeleton Prompt" - Short, directive instructions
+    prompt = f"""Task: Professional Cricket News Rewrite.
+    Style: Heading + 2 Paras. Double-spaced. Narrative flow (no lists).
 
-EXAMPLE 1 (Toss):
-🏏 TOSS UPDATE – ENG vs SL 🏏 
-Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
-A massive game in Group 2 to kick off the business end. Game on!
+    Template Example:
+    🏏 TOSS – ENG vs SL 🏏
+    Sri Lanka elected to bowl first in this Super 8 opener.
 
-EXAMPLE 2 (Match Update):
-🏏 10 OVER UPDATE – ENG vs SL 🏏 
-England find themselves in a tough spot, reaching 68/4 after 10 overs in their Super 8 opener.
-Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark.
+    The Lions aim to exploit early moisture on a turning track. Game on!
 
-RULES:
-1. Exactly 1 Heading and 2 narrative paragraphs.
-2. Aim for around 50 to 75 words total to match the examples perfectly.
-3. Do not use bullet points or "Score: X" labels. Weave stats into natural sentences.
-4. Keep the same level of detail as the examples. Do not cut out the context.
+    Rules:
+    - Exactly 2 paras. Double newline (\n\n) between them.
+    - 3-4 sentences total. No filler ("The stage is set").
+    - No "Score: X" labels. Weave stats into sentences.
 
-RAW DATA:
-{text}
-"""
+    Data: {clean_data}"""
     
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5, 
-        "max_tokens": 250
+        "max_tokens": 250 # Reduced to prevent rambling and save output tokens
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=12)
+        # TOKEN SAVER 3: Return raw content to avoid extra processing
         return res.json()['choices'][0]['message']['content'].strip()
-    except Exception as e:
-        print("AI Edit Error:", e)
+    except:
         return None
         
 # =====================
