@@ -5,6 +5,7 @@ import sqlite3
 import urllib.parse
 from bs4 import BeautifulSoup
 from datetime import datetime
+import re
 
 # =====================
 # CONFIGURATION
@@ -40,41 +41,50 @@ conn.commit()
 match_state = {}
 last_update_id = None
 
+# =====================
+# THE FINAL AI ENGINE (MIRROR STYLE)
+# =====================
 def get_pro_edit(text):
     if not GROQ_API_KEY: return None
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
-    # We send enough data for context but not enough to cause "rambling"
-    clean_data = text[:500] 
+    prompt = f"""You are a professional Cricket News Editor for a WhatsApp channel.
+Rewrite the raw match data into a CRISP NARRATIVE post.
 
-    prompt = f"""You are a professional Cricket News Editor. 
-Rewrite the match data into a CRISP, BROADCAST-STYLE narrative.
+YOUR OUTPUT MUST EXACTLY MATCH THE LENGTH, TONE, AND FORMAT OF THESE EXAMPLES. Do not make it shorter like a tweet. Do not make it a long essay.
 
-STRUCTURE:
-1. Heading: 🏏 [EVENT] – [TEAMS] 🏏
-2. Paragraph 1: Describe the current score and the immediate "vibe" of the game (e.g., struggling, cruising, high-stakes).
-3. Paragraph 2: Mention key players (scorers/bowlers) and where the momentum is shifted.
+EXAMPLE 1 (Toss):
+🏏 TOSS UPDATE – ENG vs SL 🏏 
+Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
+A massive game in Group 2 to kick off the business end. Game on!
 
-STRICT LIMITS:
-- Exactly 2 paragraphs. 
-- Total length should be between 70 to 90 words.
-- NO bullet points. NO "Score: X" labels.
-- Do NOT use filler like "The stage is set" or "Fans are in for a treat."
+EXAMPLE 2 (Match Update):
+🏏 10 OVER UPDATE – ENG vs SL 🏏 
+England find themselves in a tough spot, reaching 68/4 after 10 overs in their Super 8 opener.
+Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark.
 
-RAW DATA: {clean_data}"""
+RULES:
+1. Exactly 1 Heading and 2 narrative paragraphs.
+2. Aim for around 50 to 75 words total to match the examples perfectly.
+3. Do not use bullet points or "Score: X" labels. Weave stats into natural sentences.
+4. Keep the same level of detail as the examples. Do not cut out the context.
+
+RAW DATA:
+{text}
+"""
     
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5, # The perfect balance for narrative flow
-        "max_tokens": 250   # Ceiling is high enough to finish, low enough to save tokens
+        "temperature": 0.5, 
+        "max_tokens": 250
     }
-    
     try:
         res = requests.post(url, headers=headers, json=data, timeout=12)
         return res.json()['choices'][0]['message']['content'].strip()
-    except:
+    except Exception as e:
+        print("AI Edit Error:", e)
         return None
         
 # =====================
@@ -340,25 +350,20 @@ def fetch_match_update(match_url, match_name):
         msg = None
         is_match_over = any(phrase in event_lower for phrase in ["won by", "win by", "match drawn", "match tied", "abandoned", "no result"])
         
-        # 1. NEW LOGIC: EARLY COLLAPSE & DOUBLE STRIKE
+        # 1. EARLY COLLAPSE & DOUBLE STRIKE
         if wickets > last_wk:
             new_wk_ov = cur_overs
-            
-            # Condition A: Early Collapse (3 Wickets in Powerplay)
             if wickets == 3 and cur_overs <= 6.0:
                 eid = f"{m_id}_COLLAPSE_3WK"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                     msg = f"🚨 *EARLY COLLAPSE* 🚨\n—————————————————\n💥 Huge trouble early on!\n\n🏏 *MATCH:* {match_name}\n📊 *SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST WICKET:* _{event_text}_\n\n🖼 [Tap for Match Action]({get_img_link(match_name)})\n—————————————————\n📉 *The batting side is under massive pressure!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-                    
-            # Condition B: Double Strike (2 wickets fall within 1.0 overs)
             elif last_wk_ov > 0 and (new_wk_ov - last_wk_ov) <= 1.0 and wickets > 1:
                 eid = f"{m_id}_DOUBLE_STRIKE_{wickets}"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                     msg = f"🔥 *DOUBLE STRIKE* 🔥\n—————————————————\n🎯 Two quick wickets have changed the momentum!\n\n🏏 *MATCH:* {match_name}\n📊 *NEW SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST:* _{event_text}_\n\n🖼 [Tap for Celebration Photos]({get_img_link(match_name)})\n—————————————————\n⚠️ *Huge turning point in the game!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-            
-            last_wk_ov = new_wk_ov # Update the over tracker for the next check
+            last_wk_ov = new_wk_ov 
 
         # 2. MATCH END
         if not msg and is_match_over:
@@ -398,13 +403,11 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 5. NEW LOGIC: PLAYER MILESTONES & "RAPID FIRE"
+        # 5. PLAYER MILESTONES & "RAPID FIRE"
         if not msg:
             event_type = None
             speed_alert = ""
             
-            # Extract numbers from commentary to check balls faced
-            import re
             balls_faced = 999 
             ball_match = re.search(r'(\d+)\s*(balls|b)', event_lower)
             if ball_match:
@@ -428,11 +431,9 @@ def fetch_match_update(match_url, match_name):
 
         if msg: send_telegram(msg, pro_edit=True)
         
-        # Save exact state to DB, including the new last_wicket_over
         try:
             cursor.execute("INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)", (m_id, cur_overs, wickets, toss_done, last_wk_ov))
         except:
-            # Fallback if DB didn't alter properly
             cursor.execute("INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done) VALUES (?,?,?,?)", (m_id, cur_overs, wickets, toss_done))
             
         conn.commit()
@@ -441,7 +442,7 @@ def fetch_match_update(match_url, match_name):
 
 if __name__ == "__main__":
     print("🚀 WhatsApp Content Assistant & Narrative AI Engine Starting...")
-    send_telegram("✅ *Content Assistant Online!*\n- Rapid Fire Tracking Active ⚡\n- Double Strike Alerts Active 🔥\n- AI Editor (Narrative Style) Active\n- Dynamic Image Links Active")
+    send_telegram("✅ *Content Assistant Online!*\n- Rapid Fire Tracking Active ⚡\n- Double Strike Alerts Active 🔥\n- AI Editor (Perfect Length) Active")
     
     while True:
         try:
