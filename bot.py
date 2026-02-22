@@ -40,47 +40,42 @@ conn.commit()
 match_state = {}
 last_update_id = None
 
-# =====================
-# THE FINAL AI ENGINE (SUPER 8 STYLE)
-# =====================
 def get_pro_edit(text):
     if not GROQ_API_KEY: return None
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
+    # We send enough data for context but not enough to cause "rambling"
+    clean_data = text[:500] 
+
     prompt = f"""You are a professional Cricket News Editor. 
-Rewrite the following raw match data into a CRISP NARRATIVE post. 
+Rewrite the match data into a CRISP, BROADCAST-STYLE narrative.
 
-STRICT TEMPLATE RULES:
+STRUCTURE:
 1. Heading: 🏏 [EVENT] – [TEAMS] 🏏
-2. Body: Exactly 2 short, punchy paragraphs.
-3. Style: Narrative (No bullet points, no "Score: X" labels). Weave the stats into the sentences.
-4. Limit: Keep the total length nearly identical to the examples below.
+2. Paragraph 1: Describe the current score and the immediate "vibe" of the game (e.g., struggling, cruising, high-stakes).
+3. Paragraph 2: Mention key players (scorers/bowlers) and where the momentum is shifted.
 
-EXAMPLE 1 (Toss):
-🏏 TOSS UPDATE – ENG vs SL 🏏 
-Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
-A massive game in Group 2 to kick off the business end. Game on! 
+STRICT LIMITS:
+- Exactly 2 paragraphs. 
+- Total length should be between 70 to 90 words.
+- NO bullet points. NO "Score: X" labels.
+- Do NOT use filler like "The stage is set" or "Fans are in for a treat."
 
-EXAMPLE 2 (Match):
-🏏 10 OVER UPDATE – ENG vs SL 🏏 
-England find themselves in a tough spot, reaching 68/4 after 10 overs in their Super 8 opener.
-Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark.
-
-RAW DATA TO REWRITE:
-{text}
-"""
+RAW DATA: {clean_data}"""
     
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5, 
-        "max_tokens": 400
+        "temperature": 0.5, # The perfect balance for narrative flow
+        "max_tokens": 250   # Ceiling is high enough to finish, low enough to save tokens
     }
+    
     try:
         res = requests.post(url, headers=headers, json=data, timeout=12)
         return res.json()['choices'][0]['message']['content'].strip()
-    except: return None
+    except:
+        return None
         
 # =====================
 # CORE UTILITIES
