@@ -4,30 +4,25 @@ import sqlite3
 import requests
 from google import genai
 
-# 1. Grab Environment Variables DIRECTLY
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RAPID_API_KEY = os.getenv("RAPID_API_KEY")
 RAPID_HOST = "cricbuzz-cricket.p.rapidapi.com"
 
-# --- SAFETY CHECK ---
 if not GEMINI_API_KEY or not RAPID_API_KEY or not BOT_TOKEN:
     print("🚨 SYSTEM HALTED: Missing API Keys!")
     time.sleep(60)
     exit()
 
-# 2. Setup Gemini AI 
 client = genai.Client() 
 
-# 3. Database Setup
 conn = sqlite3.connect("cricket.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, toss_done INTEGER DEFAULT 0)")
 conn.commit()
 
-# --- Command Tracking ---
 last_update_id = None
 
 def send_telegram(text):
@@ -50,29 +45,20 @@ def get_ai_news(prompt):
         return None
 
 # =====================
-# THE BULLETPROOF SEARCH (FIXED KEYS)
+# FIXED PARSER: Strict International Filter
 # =====================
-def extract_matches_from_api(data):
-    raw_matches = []
-    def find_matches(obj):
-        if isinstance(obj, dict):
-            # FIXED: Looking for the correct Cricbuzz short name keys
-            if 'matchId' in obj and ('team1ShortName' in obj or 'team1' in obj):
-                raw_matches.append(obj)
-            for k, v in obj.items():
-                if isinstance(v, (dict, list)):
-                    find_matches(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                if isinstance(item, (dict, list)):
-                    find_matches(item)
-                
-    find_matches(data)
-    return raw_matches
+def extract_intl_matches(data):
+    matches_found = []
+    # Ensures we don't burn API limits on domestic/league matches
+    for type_match in data.get('typeMatches', []):
+        if type_match.get('matchType') == 'International':
+            for series in type_match.get('seriesMatches', []):
+                wrapper = series.get('seriesAdWrapper', {})
+                for match in wrapper.get('matches', []):
+                    if 'matchInfo' in match:
+                        matches_found.append(match['matchInfo'])
+    return matches_found
 
-# =====================
-# COMMAND HANDLER
-# =====================
 def handle_commands():
     global last_update_id
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
@@ -87,13 +73,10 @@ def handle_commands():
         
         for update in res.get("result", []):
             last_update_id = update["update_id"]
-            
             msg_data = update.get("message") or update.get("channel_post")
-            if not msg_data: 
-                continue
+            if not msg_data: continue
             
             text = msg_data.get("text", "")
-            
             if "/score" in text:
                 send_telegram("🏏 Let me check the live scores for you...")
                 fetch_live_summary()
@@ -107,18 +90,23 @@ def fetch_live_summary():
     
     try:
         res = requests.get(url, headers=headers, timeout=15).json()
-        matches = extract_matches_from_api(res)
+        
+        # If API returns an error message instead of match data, send it directly to Telegram
+        if 'message' in res:
+            send_telegram(f"⚠️ API Error: {res['message']}")
+            return
+
+        matches = extract_intl_matches(res)
         
         matches_found = []
         for m in matches:
-            # FIXED: Extracting the correct short names
-            t1 = m.get('team1ShortName') or m.get('team1', {}).get('teamSName', 'T1')
-            t2 = m.get('team2ShortName') or m.get('team2', {}).get('teamSName', 'T2')
+            t1 = m.get('team1', {}).get('teamSName', 'T1')
+            t2 = m.get('team2', {}).get('teamSName', 'T2')
             state = m.get('state', 'Live')
             matches_found.append(f"{t1} vs {t2} ({state})")
         
         if not matches_found:
-            send_telegram("There are no live matches at the moment.")
+            send_telegram("There are no live international matches at the moment.")
             return
             
         prompt = f"User asked for a score update. Here are the live matches: {', '.join(matches_found)}. Write a very brief, punchy bulleted summary."
@@ -128,25 +116,24 @@ def fetch_live_summary():
     except Exception as e:
         send_telegram("⚠️ Sorry, I hit an error pulling the scores.")
 
-# =====================
-# BACKGROUND POLLING
-# =====================
 def process_matches():
     url = f"https://{RAPID_HOST}/matches/v1/live"
     headers = {"X-RapidAPI-Key": RAPID_API_KEY, "X-RapidAPI-Host": RAPID_HOST}
     
     try:
         res = requests.get(url, headers=headers, timeout=15).json()
-        matches = extract_matches_from_api(res)
+        if 'message' in res: 
+            return # Quietly skip if API limit is hit to prevent crashes
+
+        matches = extract_intl_matches(res)
         
         for m in matches:
-            m_id = str(m['matchId'])
-            # FIXED: Extracting the correct short names
-            t1 = m.get('team1ShortName') or m.get('team1', {}).get('teamSName', 'T1')
-            t2 = m.get('team2ShortName') or m.get('team2', {}).get('teamSName', 'T2')
+            m_id = str(m.get('matchId', ''))
+            t1 = m.get('team1', {}).get('teamSName', 'T1')
+            t2 = m.get('team2', {}).get('teamSName', 'T2')
             m_name = f"{t1} vs {t2}"
-            
-            process_single_match(m_id, m_name)
+            if m_id:
+                process_single_match(m_id, m_name)
     except Exception as e:
         pass
 
