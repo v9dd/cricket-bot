@@ -72,7 +72,7 @@ def get_pro_edit(text, team_batting=None):
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5, 
-        "max_tokens": 180 # Increased to prevent "cutoff" while still staying short
+        "max_tokens": 160 # Increased to prevent "cutoff" while still staying short
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=12)
