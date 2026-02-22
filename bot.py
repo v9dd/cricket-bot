@@ -51,6 +51,26 @@ def get_ai_news(prompt):
         return None
 
 # =====================
+# THE BULLETPROOF SEARCH
+# =====================
+def extract_matches_from_api(data):
+    raw_matches = []
+    # This recursively digs through every single nested folder in the API
+    def find_matches(obj):
+        if isinstance(obj, dict):
+            # If we find a folder that has all 3 of these, we found a match!
+            if 'matchId' in obj and 'team1' in obj and 'team2' in obj:
+                raw_matches.append(obj)
+            for k, v in obj.items():
+                find_matches(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                find_matches(item)
+                
+    find_matches(data)
+    return raw_matches
+
+# =====================
 # COMMAND HANDLER
 # =====================
 def handle_commands():
@@ -89,17 +109,16 @@ def fetch_live_summary():
     
     try:
         res = requests.get(url, headers=headers, timeout=15).json()
-        intl = [s for s in res.get('typeMatches', []) if s.get('matchType') == 'intl']
+        
+        # Use our new bulletproof search algorithm
+        matches = extract_matches_from_api(res)
         
         matches_found = []
-        for section in intl:
-            for match in section.get('seriesMatches', []):
-                m = match.get('seriesAdWrapper', {}).get('matchScoreDetails', {})
-                if not m: continue
-                
-                name = f"{m['team1ShortName']} vs {m['team2ShortName']}"
-                state = m.get('matchState', 'Live')
-                matches_found.append(f"{name} ({state})")
+        for m in matches:
+            t1 = m.get('team1', {}).get('teamSName', 'T1')
+            t2 = m.get('team2', {}).get('teamSName', 'T2')
+            state = m.get('state', 'Live')
+            matches_found.append(f"{t1} vs {t2} ({state})")
         
         if not matches_found:
             send_telegram("There are no live international matches at the moment.")
@@ -119,17 +138,15 @@ def process_matches():
     
     try:
         res = requests.get(url, headers=headers, timeout=15).json()
-        intl = [s for s in res.get('typeMatches', []) if s.get('matchType') == 'intl']
+        matches = extract_matches_from_api(res)
         
-        for section in intl:
-            for match in section.get('seriesMatches', []):
-                m = match.get('seriesAdWrapper', {}).get('matchScoreDetails', {})
-                if not m: continue
-                
-                m_id = str(m['matchId'])
-                m_name = f"{m['team1ShortName']} vs {m['team2ShortName']}"
-                
-                process_single_match(m_id, m_name)
+        for m in matches:
+            m_id = str(m['matchId'])
+            t1 = m.get('team1', {}).get('teamSName', 'T1')
+            t2 = m.get('team2', {}).get('teamSName', 'T2')
+            m_name = f"{t1} vs {t2}"
+            
+            process_single_match(m_id, m_name)
     except Exception as e:
         pass
 
