@@ -35,7 +35,7 @@ match_state = {}
 last_update_id = None
 
 # =====================
-# AI EDITOR (NARRATIVE STYLE)
+# AI EDITOR (ULTRA-SHORT CRISP NARRATIVE)
 # =====================
 def get_pro_edit(text):
     if not GROQ_API_KEY: return None
@@ -43,9 +43,9 @@ def get_pro_edit(text):
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
     prompt = f"""You are a professional Cricket News Editor for a viral WhatsApp Channel.
-Rewrite the raw match update into a short, crisp, narrative-style post. Do NOT use bullet points or lists. 
+Rewrite the raw match update into an EXTREMELY short, crisp, narrative-style post. Do NOT use bullet points or lists. 
 
-Follow this EXACT format and tone based on these examples:
+Follow this EXACT format, tone, and LENGTH based on these examples. Do not make it longer than these:
 
 Example 1:
 🏏 TOSS UPDATE – ENG vs SL 🏏 
@@ -58,11 +58,11 @@ England find themselves in a tough spot, reaching 68/4 after 10 overs.
 The batting team is trying to build a fightback, but the bowlers have dominated the phase with crucial wickets.
 
 Rules for your rewrite:
-1. Create ONE clear heading with emojis (e.g., 🏏 [PHASE/EVENT] – [MATCH NAME] 🏏).
-2. Write 1 or 2 short, punchy paragraphs summarizing the current state of the game. 
-3. Weave the score, runs, and wickets smoothly into the sentences. DO NOT use rigid labels like "Score: X" or "Overs: Y".
-4. Strictly NO bullet points. 
-5. End with a short concluding hype sentence.
+1. STRICT LENGTH LIMIT: The text below the heading MUST be no more than 2 to 3 very short sentences. Do not exceed 40-50 words in total.
+2. NO FILLER: Cut out unnecessary words, deep analysis, or long context. Stick only to the punchy, immediate news.
+3. ONE HEADING: Create ONE clear heading with emojis (e.g., 🏏 [PHASE/EVENT] – [MATCH NAME] 🏏).
+4. CRISP WEAVING: Weave the score smoothly into the sentences. DO NOT use rigid labels like "Score: X" or "Overs: Y".
+5. NO BULLET POINTS: Strictly no lists or numbered stats.
 
 RAW UPDATE DATA to rewrite:
 {text}
@@ -71,8 +71,8 @@ RAW UPDATE DATA to rewrite:
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5, 
-        "max_tokens": 500
+        "temperature": 0.4, # Lowered to enforce strict adherence to constraints
+        "max_tokens": 150   # Physically blocks the AI from writing long paragraphs
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=10)
@@ -400,7 +400,7 @@ def fetch_match_update(match_url, match_name):
 
 if __name__ == "__main__":
     print("🚀 WhatsApp Editor Bot + Groq Llama-3.3-70B Active!")
-    send_telegram("✅ *Content Assistant Online!*\nSmart T20 Logic, Narrative AI Edits, and Image Fetching are fully ACTIVE.")
+    send_telegram("✅ *Content Assistant Online!*\nUltra-short AI Edits, Smart T20 Logic, and Image Fetching are fully ACTIVE.")
     while True:
         try:
             handle_commands()
