@@ -40,7 +40,6 @@ def send_telegram(text):
 
 def get_ai_news(prompt):
     try:
-        # FIXED: Updated to gemini-2.0-flash
         response = client.models.generate_content(
             model='gemini-2.0-flash',
             contents=f"Format this as professional cricket news for WhatsApp: {prompt}"
@@ -51,19 +50,22 @@ def get_ai_news(prompt):
         return None
 
 # =====================
-# THE BULLETPROOF SEARCH
+# THE BULLETPROOF SEARCH (FIXED KEYS)
 # =====================
 def extract_matches_from_api(data):
     raw_matches = []
     def find_matches(obj):
         if isinstance(obj, dict):
-            if 'matchId' in obj and 'team1' in obj and 'team2' in obj:
+            # FIXED: Looking for the correct Cricbuzz short name keys
+            if 'matchId' in obj and ('team1ShortName' in obj or 'team1' in obj):
                 raw_matches.append(obj)
             for k, v in obj.items():
-                find_matches(v)
+                if isinstance(v, (dict, list)):
+                    find_matches(v)
         elif isinstance(obj, list):
             for item in obj:
-                find_matches(item)
+                if isinstance(item, (dict, list)):
+                    find_matches(item)
                 
     find_matches(data)
     return raw_matches
@@ -109,13 +111,14 @@ def fetch_live_summary():
         
         matches_found = []
         for m in matches:
-            t1 = m.get('team1', {}).get('teamSName', 'T1')
-            t2 = m.get('team2', {}).get('teamSName', 'T2')
+            # FIXED: Extracting the correct short names
+            t1 = m.get('team1ShortName') or m.get('team1', {}).get('teamSName', 'T1')
+            t2 = m.get('team2ShortName') or m.get('team2', {}).get('teamSName', 'T2')
             state = m.get('state', 'Live')
             matches_found.append(f"{t1} vs {t2} ({state})")
         
         if not matches_found:
-            send_telegram("There are no live international matches at the moment.")
+            send_telegram("There are no live matches at the moment.")
             return
             
         prompt = f"User asked for a score update. Here are the live matches: {', '.join(matches_found)}. Write a very brief, punchy bulleted summary."
@@ -138,8 +141,9 @@ def process_matches():
         
         for m in matches:
             m_id = str(m['matchId'])
-            t1 = m.get('team1', {}).get('teamSName', 'T1')
-            t2 = m.get('team2', {}).get('teamSName', 'T2')
+            # FIXED: Extracting the correct short names
+            t1 = m.get('team1ShortName') or m.get('team1', {}).get('teamSName', 'T1')
+            t2 = m.get('team2ShortName') or m.get('team2', {}).get('teamSName', 'T2')
             m_name = f"{t1} vs {t2}"
             
             process_single_match(m_id, m_name)
@@ -159,7 +163,6 @@ def process_single_match(m_id, m_name):
         row = cursor.execute("SELECT last_over, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
         last_over, toss_done = (row[0], row[1]) if row else (0.0, 0)
 
-        # FIXED: Only save to database if Gemini actually succeeds (if msg:)
         if not toss_done:
             status = score_info.get('matchHeader', {}).get('status', "")
             if "won the toss" in status.lower():
