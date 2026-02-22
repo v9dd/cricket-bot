@@ -23,7 +23,6 @@ cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, last_wickets INTEGER, toss_done INTEGER DEFAULT 0)")
 cursor.execute("CREATE TABLE IF NOT EXISTS daily_logs (date TEXT PRIMARY KEY)")
-# NEW: Table for Tracking Management
 cursor.execute("CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)")
 conn.commit()
 
@@ -92,24 +91,27 @@ def handle_daily_briefing():
                 conn.commit()
 
 # =====================
-# COMMAND HANDLER (TRACKING MANAGER)
+# COMMAND HANDLER
 # =====================
 def handle_commands():
     global last_update_id
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+    
+    # ENHANCEMENT: Fixed the offset logic so Telegram stops spamming past commands
+    params = {"timeout": 5}
+    if last_update_id:
+        params["offset"] = last_update_id + 1
+        
     try:
-        res = requests.get(url, params={"timeout": 5}, timeout=10).json()
+        res = requests.get(url, params=params, timeout=10).json()
         if not res.get("ok"): return
         
         for update in res.get("result", []):
             last_update_id = update["update_id"]
-            requests.get(url, params={"offset": last_update_id + 1}, timeout=5)
-            
             msg_data = update.get("message") or update.get("channel_post")
             if not msg_data: continue
             text = msg_data.get("text", "")
 
-            # 1. SHOW TRACK LIST
             if "/tracklist" in text:
                 matches = scrape_match_links()
                 if not matches:
@@ -120,12 +122,10 @@ def handle_commands():
                 for i, (name, link) in enumerate(matches):
                     m_id = link.split("/")[-2]
                     row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
-                    # Default to tracking (1) if not in DB
                     status = "✅ Tracking" if (not row or row[0] == 1) else "❌ Muted"
                     report += f"*{i+1}.* {name}\nStatus: {status}\nToggle: `/track {i+1}` or `/stop {i+1}`\n\n"
                 send_telegram(report)
 
-            # 2. START TRACKING
             elif "/track" in text:
                 try:
                     idx = int(text.split()[-1]) - 1
@@ -137,7 +137,6 @@ def handle_commands():
                     send_telegram(f"✅ Now tracking: *{name}*")
                 except: send_telegram("⚠️ Invalid ID. Use `/tracklist` to see IDs.")
 
-            # 3. STOP TRACKING
             elif "/stop" in text:
                 try:
                     idx = int(text.split()[-1]) - 1
@@ -149,22 +148,22 @@ def handle_commands():
                     send_telegram(f"❌ Muted: *{name}*")
                 except: send_telegram("⚠️ Invalid ID. Use `/tracklist` to see IDs.")
 
-            # 4. BASIC SCORE COMMAND
             elif "/score" in text:
-                send_telegram("🏏 *Fetching live international scores...*")
+                send_telegram("🏏 *Fetching live & completed matches...*")
                 matches = scrape_match_links()
                 if not matches:
-                    send_telegram("⚠️ There are no live international matches playing right now.")
+                    send_telegram("⚠️ There are no international matches on the board right now.")
                     continue
+                
                 summary_data = []
                 for name, link in matches[:5]:
                     score = scrape_instant_score(link)
-                    summary_data.append(f"🔹 *{name}*\n📊 {score}")
-                send_telegram("🏆 *LIVE INTERNATIONAL SCORES* 🏆\n\n" + "\n\n".join(summary_data))
+                    summary_data.append(f"🔹 *{name}*\n{score}")
+                send_telegram("🏆 *LIVE & RECENT INTERNATIONALS* 🏆\n\n" + "\n\n".join(summary_data))
     except: pass
 
 # =====================
-# SCRAPING ENGINE (NATIVE CRICBUZZ)
+# SCRAPING ENGINE 
 # =====================
 def scrape_match_links():
     try:
@@ -190,13 +189,33 @@ def scrape_instant_score(match_url):
     try:
         response = requests.get(match_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Get Score
         score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
         if not score_div: return "Score not available yet"
         p = score_div.find_all("div")
         runs = p[0].get_text(strip=True)
         wickets = p[1].get_text(strip=True).replace("-", "")
         overs = p[2].get_text(strip=True).replace("(", "").replace(")", "")
-        return f"{runs}-{wickets} ({overs} overs)"
+        score_str = f"📊 {runs}-{wickets} ({overs} overs)"
+
+        # ENHANCEMENT: Get Result or Latest Event for /score
+        event_text = ""
+        commentary_main = soup.find("div", class_=lambda x: x and "leading-6" in x)
+        if commentary_main:
+            event_blocks = commentary_main.find_all("div", recursive=False)
+            if event_blocks:
+                target_block = event_blocks[0] if "." in overs else (event_blocks[1] if len(event_blocks) > 1 else event_blocks[0])
+                flex_row = target_block.find("div", class_=lambda x: x and "flex" in x and "gap-4" in x)
+                if flex_row:
+                    event_divs = flex_row.find_all("div", recursive=False)
+                    if len(event_divs) >= 2:
+                        event_text = event_divs[1].get_text(strip=True)
+
+        if any(phrase in event_text.lower() for phrase in ["won by", "win by", "match drawn", "match tied", "abandoned", "no result"]):
+            return f"{score_str}\n🎯 *Result:* {event_text}"
+        
+        return f"{score_str}\n🔥 *Latest:* {event_text}" if event_text else score_str
     except: return "Error loading score"
 
 def fetch_toss_update(match_url, match_name):
@@ -220,6 +239,7 @@ def fetch_match_update(match_url, match_name):
     try:
         response = requests.get(match_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
+        
         score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
         if not score_div: return
         p = score_div.find_all("div")
@@ -246,7 +266,10 @@ def fetch_match_update(match_url, match_name):
         row = cursor.execute("SELECT last_over, last_wickets, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
         last_ov, last_wk, toss_done = row if row else (0.0, 0, 0)
         
-        if cur_overs < last_ov - 5: last_ov = 0.0
+        # ENHANCEMENT: Reset both overs AND wickets for 2nd Innings
+        if cur_overs < last_ov - 5: 
+            last_ov = 0.0
+            last_wk = 0
             
         msg = None
         is_match_over = any(phrase in event_lower for phrase in ["won by", "win by", "match drawn", "match tied", "abandoned", "no result"])
@@ -289,7 +312,7 @@ def fetch_match_update(match_url, match_name):
 
 if __name__ == "__main__":
     print("🚀 Pro-Tier Cricket Bot Starting...")
-    send_telegram("✅ *Bot Online!* Advanced Filtering, Daily Schedule, and Tracking Manager active.")
+    send_telegram("✅ *Bot Online!* Tracking Manager & Match Results system are fully active.")
     while True:
         try:
             handle_commands()
