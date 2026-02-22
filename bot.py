@@ -34,47 +34,41 @@ conn.commit()
 match_state = {}
 last_update_id = None
 
-# =====================
-# AI EDITOR (ULTRA-CRISP & SHORT)
-# =====================
 def get_pro_edit(text):
     if not GROQ_API_KEY: return None
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
-    prompt = f"""You are a professional Cricket News Editor. 
-Rewrite the data into a SHORT narrative post. 
+    # THE "GOLDILOCKS" PROMPT
+    prompt = f"""You are a high-end Cricket Journalist. 
+Rewrite the data into a professional narrative. 
 
-STRICT SIZE RULE: Your response must be EXACTLY the same length and structure as these examples. Do not add extra analysis or "fluff" sentences.
+⚖️ THE BALANCE RULE:
+- Paragraph 1: State the current score/event and the immediate vibe (e.g., "India is cruising" or "England is struggling").
+- Paragraph 2: Mention 1 key player or a specific turning point from the data.
+- TOTAL LENGTH: Aim for 50-65 words. (Exactly like the Super 8 examples).
 
-Example 1:
-🏏 TOSS UPDATE – ENG vs SL 🏏 
-Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
-A massive game in Group 2 to kick off the business end. Game on! 🏴󠁧󠁢󠁥󠁮󠁧󠁿
+❌ STRICTLY FORBIDDEN:
+- No "Stage is set", "Fans are in for a treat", or "Thrillers" filler.
+- No bullet points.
+- No repeating the heading in the body.
 
-Example 2:
-🏏 10 OVER UPDATE – ENG vs SL 🏏 
-England find themselves in a tough spot, reaching 68/4 after 10 overs in their Super 8 opener.
-Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark.
-
-STRICT REWRITE RULES:
-1. Max 2 short paragraphs.
-2. Max 60 words total. 
-3. No bullet points.
-4. No generic "The stage is set" or "Fans can expect" filler text.
-5. Use the heading format: 🏏 [EVENT] – [TEAMS] 🏏
+✅ REQUIRED FORMAT:
+🏏 [HEADING IN CAPS] – [TEAMS] 🏏
+[Narrative Paragraph 1]
+[Narrative Paragraph 2]
 
 DATA: {text}"""
     
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3, 
-        "max_tokens": 150   
+        "temperature": 0.5, # 0.5 is the "Sweet Spot" for balance
+        "max_tokens": 200   # Sufficient ceiling to prevent mid-sentence cuts
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=10)
-        return res.json()['choices'][0]['message']['content']
+        return res.json()['choices'][0]['message']['content'].strip()
     except Exception as e:
         print("AI Edit Error:", e)
         return None
