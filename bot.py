@@ -4,19 +4,27 @@ import sqlite3
 import requests
 from google import genai
 from datetime import datetime
-from dotenv import load_dotenv
 
-# 1. Load Environment Variables (Railway handles this automatically)
-load_dotenv()
-
+# 1. Grab Environment Variables DIRECTLY (No dotenv needed on Railway)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RAPID_API_KEY = os.getenv("RAPID_API_KEY")
 RAPID_HOST = "cricbuzz-cricket.p.rapidapi.com"
 
-# 2. Setup Gemini AI using the NEW google-genai library
-client = genai.Client(api_key=GEMINI_API_KEY)
+# --- SAFETY CHECK: Prevent confusing crashes ---
+if not GEMINI_API_KEY or not RAPID_API_KEY or not BOT_TOKEN:
+    print("🚨 SYSTEM HALTED: Missing API Keys!")
+    print(f"BOT_TOKEN: {'✅ Loaded' if BOT_TOKEN else '❌ MISSING'}")
+    print(f"GEMINI_API_KEY: {'✅ Loaded' if GEMINI_API_KEY else '❌ MISSING'}")
+    print(f"RAPID_API_KEY: {'✅ Loaded' if RAPID_API_KEY else '❌ MISSING'}")
+    print("Waiting 60 seconds for Railway to finish deploying your new keys...")
+    time.sleep(60)
+    exit()
+
+# 2. Setup Gemini AI 
+# The new library automatically finds GEMINI_API_KEY from the environment
+client = genai.Client() 
 
 # 3. Database Setup (Persists safely on Railway)
 conn = sqlite3.connect("cricket.db", check_same_thread=False)
@@ -35,7 +43,6 @@ def send_telegram(text):
 
 def get_ai_news(prompt):
     try:
-        # Updated syntax for the new google-genai SDK
         response = client.models.generate_content(
             model='gemini-1.5-flash',
             contents=f"Format this as professional cricket news for WhatsApp: {prompt}"
@@ -51,7 +58,6 @@ def process_matches():
     
     try:
         res = requests.get(url, headers=headers, timeout=15).json()
-        # Strictly look for International matches
         intl = [s for s in res.get('typeMatches', []) if s.get('matchType') == 'intl']
         
         for section in intl:
@@ -67,7 +73,6 @@ def process_matches():
         print(f"Fetch Error: {e}")
 
 def process_single_match(m_id, m_name):
-    # Fetch miniscore and commentary
     url = f"https://{RAPID_HOST}/mcenter/v1/{m_id}/comm"
     headers = {"X-RapidAPI-Key": RAPID_API_KEY, "X-RapidAPI-Host": RAPID_HOST}
     
@@ -91,7 +96,7 @@ def process_single_match(m_id, m_name):
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
                     toss_done = 1
 
-        # 2. Over Milestones (10, 20, 30)
+        # 2. Over Milestones
         if int(cur_overs // 10) > int(last_over // 10) and cur_overs >= 10:
             m_stone = int((cur_overs // 10) * 10)
             eid = f"{m_id}_O_{m_stone}"
@@ -125,4 +130,4 @@ if __name__ == "__main__":
     send_telegram("✅ Cricket Newsroom Bot is now online and monitoring matches!")
     while True:
         process_matches()
-        time.sleep(30) # Efficient polling for your 1000/hr limit
+        time.sleep(30)
