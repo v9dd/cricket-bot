@@ -3,7 +3,6 @@ import time
 import sqlite3
 import requests
 from google import genai
-from datetime import datetime
 
 # 1. Grab Environment Variables DIRECTLY
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -41,8 +40,9 @@ def send_telegram(text):
 
 def get_ai_news(prompt):
     try:
+        # FIXED: Updated to gemini-2.0-flash
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.0-flash',
             contents=f"Format this as professional cricket news for WhatsApp: {prompt}"
         )
         return response.text.strip()
@@ -55,10 +55,8 @@ def get_ai_news(prompt):
 # =====================
 def extract_matches_from_api(data):
     raw_matches = []
-    # This recursively digs through every single nested folder in the API
     def find_matches(obj):
         if isinstance(obj, dict):
-            # If we find a folder that has all 3 of these, we found a match!
             if 'matchId' in obj and 'team1' in obj and 'team2' in obj:
                 raw_matches.append(obj)
             for k, v in obj.items():
@@ -88,9 +86,7 @@ def handle_commands():
         for update in res.get("result", []):
             last_update_id = update["update_id"]
             
-            # Check for BOTH regular messages AND channel posts
             msg_data = update.get("message") or update.get("channel_post")
-            
             if not msg_data: 
                 continue
             
@@ -109,8 +105,6 @@ def fetch_live_summary():
     
     try:
         res = requests.get(url, headers=headers, timeout=15).json()
-        
-        # Use our new bulletproof search algorithm
         matches = extract_matches_from_api(res)
         
         matches_found = []
@@ -125,7 +119,9 @@ def fetch_live_summary():
             return
             
         prompt = f"User asked for a score update. Here are the live matches: {', '.join(matches_found)}. Write a very brief, punchy bulleted summary."
-        send_telegram(get_ai_news(prompt))
+        msg = get_ai_news(prompt)
+        if msg:
+            send_telegram(msg)
     except Exception as e:
         send_telegram("⚠️ Sorry, I hit an error pulling the scores.")
 
@@ -163,23 +159,26 @@ def process_single_match(m_id, m_name):
         row = cursor.execute("SELECT last_over, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
         last_over, toss_done = (row[0], row[1]) if row else (0.0, 0)
 
+        # FIXED: Only save to database if Gemini actually succeeds (if msg:)
         if not toss_done:
             status = score_info.get('matchHeader', {}).get('status', "")
             if "won the toss" in status.lower():
                 eid = f"{m_id}_TOSS"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                     msg = get_ai_news(f"TOSS: {m_name}. {status}")
-                    send_telegram(msg)
-                    cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-                    toss_done = 1
+                    if msg: 
+                        send_telegram(msg)
+                        cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+                        toss_done = 1
 
         if int(cur_overs // 10) > int(last_over // 10) and cur_overs >= 10:
             m_stone = int((cur_overs // 10) * 10)
             eid = f"{m_id}_O_{m_stone}"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = get_ai_news(f"{m_stone} OVER UPDATE: {m_name} is {cur_score} after {cur_overs} overs.")
-                send_telegram(msg)
-                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+                if msg:
+                    send_telegram(msg)
+                    cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
         for comm in data.get('commentaryList', [])[:5]:
             comm_text = comm.get('commText', "")
@@ -191,8 +190,9 @@ def process_single_match(m_id, m_name):
                 eid = f"{m_id}_{event_type}_{hash(comm_text)}"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                     msg = get_ai_news(f"Milestone: Player reached {event_type} in {m_name}. Score: {cur_score}. Info: {comm_text}")
-                    send_telegram(msg)
-                    cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+                    if msg:
+                        send_telegram(msg)
+                        cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
         cursor.execute("INSERT OR REPLACE INTO state VALUES (?,?,?)", (m_id, cur_overs, toss_done))
         conn.commit()
