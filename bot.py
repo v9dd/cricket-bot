@@ -6,8 +6,12 @@ import urllib.parse
 from bs4 import BeautifulSoup
 from datetime import datetime
 
+# =====================
+# CONFIGURATION
+# =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") # NEW: Your Groq API Key
 
 if not BOT_TOKEN:
     print("🚨 SYSTEM HALTED: Missing Telegram Token!")
@@ -31,18 +35,56 @@ match_state = {}
 last_update_id = None
 
 # =====================
+# AI EDITOR (LLAMA-3.3-70B)
+# =====================
+def get_pro_edit(text):
+    if not GROQ_API_KEY: return None
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    
+    prompt = f"""
+    You are a professional Cricket News Editor for a viral WhatsApp Channel.
+    Rewrite this match update to be exciting, urgent, and viral. 
+    Use cricket emojis, bolding for key stats, and clear structure.
+    Keep it concise for WhatsApp formatting. Do not change any numbers or facts.
+    
+    RAW UPDATE DATA: {text}
+    """
+    
+    data = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.6,
+        "max_tokens": 1024
+    }
+    try:
+        res = requests.post(url, headers=headers, json=data, timeout=10)
+        return res.json()['choices'][0]['message']['content']
+    except Exception as e:
+        print("AI Edit Error:", e)
+        return None
+
+# =====================
 # CORE UTILITIES
 # =====================
-def send_telegram(text):
+def send_telegram(text, pro_edit=False):
     if not text: return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    
+    # 1. Send the instant raw template (Safety Net)
     try:
-        # Markdown enabled, web preview disabled for clean copy-pasting
         requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": "true"}, timeout=10)
     except: pass
 
+    # 2. If it's a major update, fetch and send the AI version
+    if pro_edit and GROQ_API_KEY:
+        ai_text = get_pro_edit(text)
+        if ai_text:
+            try:
+                requests.post(url, data={"chat_id": CHAT_ID, "text": f"✨ *PRO EDIT (COPY THIS):*\n\n{ai_text}", "parse_mode": "Markdown", "disable_web_page_preview": "true"}, timeout=10)
+            except: pass
+
 def get_img_link(query):
-    # Generates a direct Google Image search link for one-tap photo sourcing
     safe_query = urllib.parse.quote(f"{query} Cricket Match 2026")
     return f"https://www.google.com/search?q={safe_query}&tbm=isch"
 
@@ -241,9 +283,8 @@ def fetch_toss_update(match_url, match_name):
         toss_text = toss_label.find_next("div").get_text(strip=True)
         match_state[match_url]["toss_sent"] = True
         
-        # WhatsApp Ready Toss Template
         msg = f"🪙 *TOSS UPDATE* 🪙\n—————————————————\n🏆 *{match_name}*\n\n🏟 *{toss_text}*\n\n🖼 [Tap for Toss Photos]({get_img_link(match_name + ' Toss')})\n—————————————————\n🏏 _Match starting soon! Get ready!_"
-        send_telegram(msg)
+        send_telegram(msg, pro_edit=True)
     except: pass
 
 def fetch_match_update(match_url, match_name):
@@ -277,7 +318,6 @@ def fetch_match_update(match_url, match_name):
         row = cursor.execute("SELECT last_over, last_wickets, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
         last_ov, last_wk, toss_done = row if row else (0.0, 0, 0)
         
-        # Reset overs and wickets for 2nd Innings
         if cur_overs < last_ov - 5: 
             last_ov = 0.0
             last_wk = 0
@@ -299,7 +339,7 @@ def fetch_match_update(match_url, match_name):
                 msg = f"🛑 *INNINGS COMPLETED* 🛑\n—————————————————\n🏏 *{match_name}* finishes their innings.\n\n📊 *FINAL SCORE:* *{score_display}*\n🎯 *UPDATE:* _{event_text}_\n\n🖼 [Tap for Match Gallery]({get_img_link(match_name)})\n—————————————————\n🕒 _Second innings starts shortly. Who's winning this?_"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 3. SMART OVER MILESTONES (T20 vs ODI Logic)
+        # 3. SMART OVER MILESTONES
         else:
             is_t20 = "T20" in match_name.upper()
             milestones = [6, 10, 15, 20] if is_t20 else [10, 20, 30, 40, 50, 60, 70, 80, 90]
@@ -313,11 +353,9 @@ def fetch_match_update(match_url, match_name):
             if passed_m:
                 eid = f"{m_id}_OV_{passed_m}_{runs}"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
-                    # Calculate Run Rate
                     try: crr = f"{(int(runs) / cur_overs):.2f}"
                     except: crr = "N/A"
                     
-                    # Smart Header
                     phase_header = f"{passed_m}-OVER"
                     if is_t20 and passed_m == 6: phase_header = "POWERPLAY"
                     elif is_t20 and passed_m in [15, 20]: phase_header = "DEATH OVERS"
@@ -325,7 +363,7 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 4. PLAYER MILESTONES (50s / 100s)
+        # 4. PLAYER MILESTONES
         event_type = None
         if any(x in event_lower for x in ["fifty", "half-century", "half century", "50 runs", "reaches 50"]): 
             event_type = "50"
@@ -338,17 +376,16 @@ def fetch_match_update(match_url, match_name):
                 msg = f"🔥 *{event_type} REACHED!* 🔥\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *A brilliant innings! Share the news!*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # Trigger message sending
-        if msg: send_telegram(msg)
+        # Fire notification with Pro Edit enabled!
+        if msg: send_telegram(msg, pro_edit=True)
         
-        # Save state
         cursor.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", (m_id, cur_overs, wickets, toss_done))
         conn.commit()
     except: pass
 
 if __name__ == "__main__":
-    print("🚀 WhatsApp Editor Content Assistant Starting...")
-    send_telegram("✅ *Content Assistant Online!*\nAdvanced Filtering, Daily Schedule, Tracking Manager, and Dynamic Images are all ACTIVE.")
+    print("🚀 WhatsApp Content Assistant + Groq AI Online!")
+    send_telegram("✅ *Content Assistant Online!*\nAdvanced Filtering, Dynamic Images, and AI Edits are all ACTIVE.")
     while True:
         try:
             handle_commands()
@@ -358,7 +395,7 @@ if __name__ == "__main__":
             for name, link in matches:
                 m_id = link.split("/")[-2]
                 
-                # Check Tracking Status: skip if muted (0)
+                # Check Tracking Config
                 row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
                 if row and row[0] == 0:
                     continue 
