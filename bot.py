@@ -41,43 +41,93 @@ conn.commit()
 match_state = {}
 last_update_id = None
 
-def get_pro_edit(text, team_batting=None):
-    if not GROQ_API_KEY: return None
+def get_pro_edit(text: str, team_batting: str = None) -> str | None:
+    """
+    Generates a professional cricket news flash using Groq API.
+    Returns formatted headline + 2 punchy paragraphs, or None on failure.
+    """
+
+    if not GROQ_API_KEY or not text:
+        return None
+
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    
-    clean_data = text[:350]
 
-    # Team context to ensure the AI knows who is losing or winning
-    context_hint = f"\n- TEAM CONTEXT: {team_batting} is currently batting. If they are losing wickets, frame it as a crisis for {team_batting}." if team_batting else ""
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-    prompt = f"""Task: Professional Cricket News Flash.
-    Style: Catchy Heading + 2 Punchy Paras. Double-spaced.
-    Tone: Impactful, fast-paced, and authoritative.
+    # Limit input to avoid token overflow but preserve meaning
+    clean_data = text.strip()[:400]
 
-    Template Example:
-    🏏 STRIKE! – SL vs ENG 🏏
-    England's top order has been dismantled by the Lankan spinners, slumping to 56/6 in just 10 overs. 
+    # Context hint to improve narrative accuracy
+    context_hint = ""
+    if team_batting:
+        context_hint = (
+            f"\nTEAM CONTEXT: {team_batting} is batting. "
+            f"If wickets fall, frame it as pressure or crisis for {team_batting}. "
+            f"If scoring freely, frame it as dominance."
+        )
 
-    With the required rate climbing, the tail-enders now face a desperate survival battle in Kandy. Game on!
+    prompt = f"""
+You are a professional cricket news editor.
 
-    Rules:
-    - 3 to 4 sentences total. Do not exceed this.
-    - Exactly 2 paragraphs with a double newline between them.
-    - Weave score and stats naturally into the narrative. No lists.{context_hint}
+TASK:
+Convert the provided match update into a breaking news flash.
 
-    Data: {clean_data}"""
-    
+OUTPUT FORMAT STRICTLY:
+• One catchy headline with emojis
+• Exactly 2 short paragraphs
+• Total 3–4 sentences maximum
+• Double newline between paragraphs
+
+STYLE:
+• Dramatic, authoritative, fast-paced
+• Professional sports journalism tone
+• Natural integration of score, overs, wickets, and match situation
+• No bullet points, no lists
+
+EXAMPLE OUTPUT:
+
+🏏 COLLAPSE! – AUS vs IND 🏏
+Australia’s batting unit has imploded under relentless pressure, crashing to 78/5 inside 14 overs.
+
+India now smells blood, with momentum fully in their control as the match swings decisively.
+
+{context_hint}
+
+MATCH DATA:
+{clean_data}
+"""
+
     data = {
         "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5, 
-        "max_tokens": 160 # Increased to prevent "cutoff" while still staying short
+        "messages": [
+            {"role": "system", "content": "You are an elite cricket news editor."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.6,
+        "max_tokens": 180,
+        "top_p": 0.9
     }
+
     try:
-        res = requests.post(url, headers=headers, json=data, timeout=12)
-        return res.json()['choices'][0]['message']['content'].strip()
-    except:
+        res = requests.post(url, headers=headers, json=data, timeout=15)
+        res.raise_for_status()
+
+        output = res.json()["choices"][0]["message"]["content"].strip()
+
+        # Extra safety cleanup
+        output = output.replace("\n\n\n", "\n\n")
+
+        return output
+
+    except requests.exceptions.RequestException as e:
+        print(f"Groq API error: {e}")
+        return None
+
+    except (KeyError, IndexError, ValueError):
+        print("Unexpected response format from Groq API")
         return None
         
 # =====================
