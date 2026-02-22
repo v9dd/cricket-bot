@@ -1,10 +1,11 @@
 import requests
 import os
 import time
+import sqlite3
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-# 1. 100% API LIMIT FREE - NO GEMINI NEEDED!
+# 1. 100% API LIMIT FREE - NO GEMINI NEEDED
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
@@ -17,9 +18,14 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# State management directly from your v1 code
+# Database Setup for Milestones
+conn = sqlite3.connect("cricket.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
+cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, toss_done INTEGER DEFAULT 0)")
+conn.commit()
+
 match_state = {}
-last_events = {}
 last_update_id = None
 
 def send_telegram(text):
@@ -29,6 +35,29 @@ def send_telegram(text):
         requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
         print(f"Telegram Error: {e}")
+
+# =====================
+# THE INTERNATIONAL FILTER
+# =====================
+def is_international(match_title):
+    title = match_title.upper()
+    
+    # Exclude domestic, leagues, and youth matches
+    if "WOMEN" in title or " U19" in title or "TROPHY" in title or "LEAGUE" in title:
+        return False
+        
+    # Catch standard international formats
+    intl_formats = ["TEST", "ODI", "T20I", "WORLD CUP"]
+    if any(fmt in title for fmt in intl_formats):
+        return True
+        
+    # Catch matches between major full-member nations
+    countries = ["INDIA", "AUSTRALIA", "ENGLAND", "NEW ZEALAND", "SOUTH AFRICA", "PAKISTAN", "SRI LANKA", "WEST INDIES", "BANGLADESH", "ZIMBABWE", "AFGHANISTAN", "IRELAND"]
+    matched = sum(1 for c in countries if c in title)
+    if matched >= 2:
+        return True
+        
+    return False
 
 # =====================
 # COMMAND HANDLER
@@ -49,11 +78,11 @@ def handle_commands():
             text = msg_data.get("text", "")
             
             if "/score" in text:
-                send_telegram("🏏 *Fetching live scores...*")
+                send_telegram("🏏 *Fetching live international scores...*")
                 
                 matches = scrape_match_links()
                 if not matches:
-                    send_telegram("⚠️ There are no live matches on Cricbuzz right now.")
+                    send_telegram("⚠️ There are no live international matches playing right now.")
                     continue
                 
                 summary_data = []
@@ -61,8 +90,7 @@ def handle_commands():
                     score = scrape_instant_score(link)
                     summary_data.append(f"🔹 *{name}*\n📊 {score}")
                 
-                # NATIVE FORMATTING (Bypasses AI completely)
-                final_msg = "🏆 *LIVE CRICKET SCORES* 🏆\n\n" + "\n\n".join(summary_data)
+                final_msg = "🏆 *LIVE INTERNATIONAL SCORES* 🏆\n\n" + "\n\n".join(summary_data)
                 send_telegram(final_msg)
                 
     except Exception as e:
@@ -86,8 +114,11 @@ def scrape_match_links():
             for card in cards:
                 name = card.get("title", "").strip()
                 if not name: continue
-                link = "https://www.cricbuzz.com" + card["href"]
-                matches.append((name, link))
+                
+                # THE FIX: Strictly filter for International Matches
+                if is_international(name):
+                    link = "https://www.cricbuzz.com" + card["href"]
+                    matches.append((name, link))
         return matches
     except Exception as e:
         return []
@@ -126,7 +157,6 @@ def fetch_toss_update(match_url, match_name):
         toss_text = toss_label.find_next("div").get_text(strip=True)
         match_state[match_url]["toss_sent"] = True
 
-        # NATIVE FORMATTING FROM YOUR V1
         message = (
             f"🪙 *TOSS UPDATE* 🪙\n\n"
             f"*{match_name}*\n\n"
@@ -152,6 +182,11 @@ def fetch_match_update(match_url, match_name):
         wickets = score_parts[1].get_text(strip=True).replace("-", "")
         overs = score_parts[2].get_text(strip=True).replace("(", "").replace(")", "")
         score = f"{runs}-{wickets}"
+        
+        try:
+            cur_overs = float(overs)
+        except:
+            cur_overs = 0.0
 
         commentary_main = soup.find("div", class_=lambda x: x and "leading-6" in x)
         if not commentary_main: return
@@ -172,29 +207,57 @@ def fetch_match_update(match_url, match_name):
         
         event_text = event_divs[1].get_text(strip=True)
 
-        unique_id = f"{match_url}_{score}_{event_text}"
-        if match_url in last_events and last_events[match_url] == unique_id:
-            return
+        # THE FIX: Restore Database Milestone Tracking (Stops Ball-by-Ball Spam)
+        m_id = match_url.split("/")[-2] if "/" in match_url else str(hash(match_name))
+        row = cursor.execute("SELECT last_over, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
+        last_over, toss_done = (row[0], row[1]) if row else (0.0, 0)
+        
+        messages_to_send = []
 
-        last_events[match_url] = unique_id
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        # 1. 10-Over Milestone Check
+        if int(cur_overs // 10) > int(last_over // 10) and cur_overs >= 10:
+            m_stone = int((cur_overs // 10) * 10)
+            eid = f"{m_id}_O_{m_stone}"
+            if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                messages_to_send.append(
+                    f"🏏 *{m_stone} OVER UPDATE: {match_name}*\n\n"
+                    f"📊 *Score:* {score} after {cur_overs} overs.\n"
+                    f"🔗 [Live Score]({match_url})"
+                )
+                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # NATIVE FORMATTING FROM YOUR V1
-        message = (
-            f"🏏 *{match_name}*\n\n"
-            f"📊 *Score:* {score} ({overs})\n"
-            f"🔥 *Event:* {event_text}\n\n"
-            f"🕒 {timestamp}\n"
-            f"🔗 [Live Score]({match_url})"
-        )
-        send_telegram(message)
+        # 2. Player Milestones (50s / 100s) Check
+        event_lower = event_text.lower()
+        event_type = None
+        if "reach" in event_lower and "50" in event_text: event_type = "50"
+        elif "reach" in event_lower and "100" in event_text: event_type = "100"
+        
+        if event_type:
+            eid = f"{m_id}_{event_type}_{hash(event_text)}"
+            if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                messages_to_send.append(
+                    f"🔥 *MILESTONE: {match_name}*\n\n"
+                    f"⭐ Player reached *{event_type}*!\n"
+                    f"💬 {event_text}\n"
+                    f"📊 *Score:* {score} ({overs})\n"
+                    f"🔗 [Match Link]({match_url})"
+                )
+                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+
+        # Save state to prevent spam
+        cursor.execute("INSERT OR REPLACE INTO state VALUES (?,?,?)", (m_id, cur_overs, toss_done))
+        conn.commit()
+
+        # Only text you if a milestone was actually hit
+        for msg in messages_to_send:
+            send_telegram(msg)
 
     except Exception:
         pass
 
 if __name__ == "__main__":
     print("🚀 Cricket Newsroom Worker Starting...")
-    send_telegram("✅ *Bot Online!* Running cleanly with NO API Limits. Type /score to check.")
+    send_telegram("✅ *Bot Online!* Now strictly filtering for International matches & 10-Over/Milestones.")
     
     while True:
         try:
@@ -208,5 +271,4 @@ if __name__ == "__main__":
         except Exception as e:
             print("Loop Error:", e)
             
-        # Safe 15-second loop because there are ZERO API limits now
-        time.sleep(15)
+        time.sleep(25)
