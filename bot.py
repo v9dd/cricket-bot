@@ -28,7 +28,7 @@ cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, toss_done INTEGER DEFAULT 0)")
 conn.commit()
 
-# --- NEW: Command Tracking ---
+# --- Command Tracking ---
 last_update_id = None
 
 def send_telegram(text):
@@ -68,7 +68,7 @@ def handle_commands():
         for update in res.get("result", []):
             last_update_id = update["update_id"]
             
-            # THE FIX: Check for BOTH regular messages AND channel posts
+            # Check for BOTH regular messages AND channel posts
             msg_data = update.get("message") or update.get("channel_post")
             
             if not msg_data: 
@@ -76,13 +76,39 @@ def handle_commands():
             
             text = msg_data.get("text", "")
             
-            # Made this more flexible in case you type it with a space or tag
             if "/score" in text:
                 send_telegram("🏏 Let me check the live scores for you...")
                 fetch_live_summary()
                 
     except Exception as e:
         print(f"Command Error: {e}")
+
+def fetch_live_summary():
+    url = f"https://{RAPID_HOST}/matches/v1/live"
+    headers = {"X-RapidAPI-Key": RAPID_API_KEY, "X-RapidAPI-Host": RAPID_HOST}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=15).json()
+        intl = [s for s in res.get('typeMatches', []) if s.get('matchType') == 'intl']
+        
+        matches_found = []
+        for section in intl:
+            for match in section.get('seriesMatches', []):
+                m = match.get('seriesAdWrapper', {}).get('matchScoreDetails', {})
+                if not m: continue
+                
+                name = f"{m['team1ShortName']} vs {m['team2ShortName']}"
+                state = m.get('matchState', 'Live')
+                matches_found.append(f"{name} ({state})")
+        
+        if not matches_found:
+            send_telegram("There are no live international matches at the moment.")
+            return
+            
+        prompt = f"User asked for a score update. Here are the live matches: {', '.join(matches_found)}. Write a very brief, punchy bulleted summary."
+        send_telegram(get_ai_news(prompt))
+    except Exception as e:
+        send_telegram("⚠️ Sorry, I hit an error pulling the scores.")
 
 # =====================
 # BACKGROUND POLLING
@@ -160,6 +186,6 @@ if __name__ == "__main__":
     print("🚀 Cricket Newsroom Worker Starting...")
     send_telegram("✅ Cricket Newsroom Bot is now online. Type /score to check live matches!")
     while True:
-        handle_commands() # Listens for /score
-        process_matches() # Checks for milestones
+        handle_commands() 
+        process_matches() 
         time.sleep(25)
