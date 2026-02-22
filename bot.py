@@ -35,42 +35,42 @@ match_state = {}
 last_update_id = None
 
 # =====================
-# AI EDITOR (GOLDILOCKS NARRATIVE)
+# AI EDITOR (ULTRA-CRISP & SHORT)
 # =====================
 def get_pro_edit(text):
     if not GROQ_API_KEY: return None
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
-    prompt = f"""You are a professional Cricket News Editor for a viral WhatsApp Channel.
-Rewrite the raw match update into a crisp, narrative-style post that mirrors the exact length and depth of these examples.
+    prompt = f"""You are a professional Cricket News Editor. 
+Rewrite the data into a SHORT narrative post. 
 
-Example 1 (Toss):
+STRICT SIZE RULE: Your response must be EXACTLY the same length and structure as these examples. Do not add extra analysis or "fluff" sentences.
+
+Example 1:
 🏏 TOSS UPDATE – ENG vs SL 🏏 
 Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
-A massive game in Group 2 to kick off the business end. Game on!
+A massive game in Group 2 to kick off the business end. Game on! 🏴󠁧󠁢󠁥󠁮󠁧󠁿
 
-Example 2 (Match Update):
+Example 2:
 🏏 10 OVER UPDATE – ENG vs SL 🏏 
 England find themselves in a tough spot, reaching 68/4 after 10 overs in their Super 8 opener.
 Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark.
 
-Rules for your rewrite:
-1. MATCH THE EXAMPLES: Provide exactly 2 short, punchy paragraphs. Not one sentence, not four paragraphs.
-2. NARRATIVE FLOW: Weave the score, wickets, and key players into the sentences. Avoid bullet points or "Label: Value" formatting.
-3. HEADING: Use ONE clear heading: 🏏 [EVENT] – [TEAMS] 🏏
-4. INFORMATION DENSITY: Mention the match context if available in the raw data to add weight to the news.
-5. NO BULLET POINTS: Strictly paragraph format only.
+STRICT REWRITE RULES:
+1. Max 2 short paragraphs.
+2. Max 60 words total. 
+3. No bullet points.
+4. No generic "The stage is set" or "Fans can expect" filler text.
+5. Use the heading format: 🏏 [EVENT] – [TEAMS] 🏏
 
-RAW UPDATE DATA:
-{text}
-"""
+DATA: {text}"""
     
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5, 
-        "max_tokens": 300   
+        "temperature": 0.3, 
+        "max_tokens": 150   
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=10)
@@ -78,7 +78,7 @@ RAW UPDATE DATA:
     except Exception as e:
         print("AI Edit Error:", e)
         return None
-
+        
 # =====================
 # CORE UTILITIES
 # =====================
