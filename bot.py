@@ -48,22 +48,23 @@ def get_pro_edit(text, team_batting=None):
     
     clean_data = text[:350]
 
-    # Context Hint prevents the AI from mixing up the batting/bowling teams
-    context_hint = f"\n- VERY IMPORTANT: The team currently batting is {team_batting}. Frame the narrative so that THIS team is the one making runs or losing wickets. If wickets are falling, {team_batting} is in trouble!" if team_batting else ""
+    # Team context to ensure the AI knows who is losing or winning
+    context_hint = f"\n- TEAM CONTEXT: {team_batting} is currently batting. If they are losing wickets, frame it as a crisis for {team_batting}." if team_batting else ""
 
-    prompt = f"""Task: Professional Cricket News Rewrite.
-    Style: Heading + 2 Paras. Double-spaced. Narrative flow (no lists).
+    prompt = f"""Task: Professional Cricket News Flash.
+    Style: Catchy Heading + 2 Punchy Paras. Double-spaced.
+    Tone: Impactful, fast-paced, and authoritative.
 
     Template Example:
-    🏏 TOSS – ENG vs SL 🏏
-    Sri Lanka elected to bowl first in this Super 8 opener.
+    🏏 STRIKE! – SL vs ENG 🏏
+    England's top order has been dismantled by the Lankan spinners, slumping to 56/6 in just 10 overs. 
 
-    The Lions aim to exploit early moisture on a turning track. Game on!
+    With the required rate climbing, the tail-enders now face a desperate survival battle in Kandy. Game on!
 
     Rules:
-    - Exactly 2 paras. Double newline (\n\n) between them.
-    - 3-4 sentences total. No filler ("The stage is set").
-    - No "Score: X" labels. Weave stats into sentences.{context_hint}
+    - 3 to 4 sentences total. Do not exceed this.
+    - Exactly 2 paragraphs with a double newline between them.
+    - Weave score and stats naturally into the narrative. No lists.{context_hint}
 
     Data: {clean_data}"""
     
@@ -71,7 +72,7 @@ def get_pro_edit(text, team_batting=None):
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5, 
-        "max_tokens": 250 
+        "max_tokens": 180 # Increased to prevent "cutoff" while still staying short
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=12)
