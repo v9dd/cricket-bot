@@ -39,39 +39,47 @@ def get_pro_edit(text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
-    # THE "GOLDILOCKS" PROMPT
-    prompt = f"""You are a high-end Cricket Journalist. 
-Rewrite the data into a professional narrative. 
+   # =====================
+# THE FINAL AI ENGINE (SUPER 8 STYLE)
+# =====================
+def get_pro_edit(text):
+    if not GROQ_API_KEY: return None
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    
+    prompt = f"""You are a professional Cricket News Editor. 
+Rewrite the following raw match data into a CRISP NARRATIVE post. 
 
-⚖️ THE BALANCE RULE:
-- Paragraph 1: State the current score/event and the immediate vibe (e.g., "India is cruising" or "England is struggling").
-- Paragraph 2: Mention 1 key player or a specific turning point from the data.
-- TOTAL LENGTH: Aim for 50-65 words. (Exactly like the Super 8 examples).
+STRICT TEMPLATE RULES:
+1. Heading: 🏏 [EVENT] – [TEAMS] 🏏
+2. Body: Exactly 2 short, punchy paragraphs.
+3. Style: Narrative (No bullet points, no "Score: X" labels). Weave the stats into the sentences.
+4. Limit: Keep the total length nearly identical to the examples below.
 
-❌ STRICTLY FORBIDDEN:
-- No "Stage is set", "Fans are in for a treat", or "Thrillers" filler.
-- No bullet points.
-- No repeating the heading in the body.
+EXAMPLE 1 (Toss):
+🏏 TOSS UPDATE – ENG vs SL 🏏 
+Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
+A massive game in Group 2 to kick off the business end. Game on! 
 
-✅ REQUIRED FORMAT:
-🏏 [HEADING IN CAPS] – [TEAMS] 🏏
-[Narrative Paragraph 1]
-[Narrative Paragraph 2]
+EXAMPLE 2 (Match):
+🏏 10 OVER UPDATE – ENG vs SL 🏏 
+England find themselves in a tough spot, reaching 68/4 after 10 overs in their Super 8 opener.
+Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark.
 
-DATA: {text}"""
+RAW DATA TO REWRITE:
+{text}
+"""
     
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5, # 0.5 is the "Sweet Spot" for balance
-        "max_tokens": 200   # Sufficient ceiling to prevent mid-sentence cuts
+        "temperature": 0.5, 
+        "max_tokens": 400 # High ceiling to ensure sentences finish properly
     }
     try:
-        res = requests.post(url, headers=headers, json=data, timeout=10)
+        res = requests.post(url, headers=headers, json=data, timeout=12)
         return res.json()['choices'][0]['message']['content'].strip()
-    except Exception as e:
-        print("AI Edit Error:", e)
-        return None
+    except: return None
         
 # =====================
 # CORE UTILITIES
