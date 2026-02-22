@@ -20,7 +20,6 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# State management directly from your v1 code
 match_state = {}
 last_events = {}
 last_update_id = None
@@ -41,12 +40,16 @@ def get_ai_news(prompt):
         )
         return response.text.strip()
     except Exception as e:
-        print(f"Gemini Error: {e}")
+        error_msg = str(e)
+        print(f"Gemini Error: {error_msg}")
+        
+        # THE FIX: Automatically handle the 429 Rate Limit error gracefully
+        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+            print("⏳ Gemini API Speed Limit Hit! Pausing the bot for 60 seconds to let the quota refresh...")
+            time.sleep(60) 
+            
         return None
 
-# =====================
-# COMMAND HANDLER
-# =====================
 def handle_commands():
     global last_update_id
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
@@ -71,7 +74,6 @@ def handle_commands():
                     continue
                 
                 summary_data = []
-                # Scrape the actual score for each match found using your v1 logic
                 for name, link in matches[:5]:
                     score = scrape_instant_score(link)
                     summary_data.append(f"{name}: {score}")
@@ -82,14 +84,11 @@ def handle_commands():
                 if msg: 
                     send_telegram(msg)
                 else:
-                    send_telegram("❌ Gemini AI failed to write the message. Please check Railway logs for the exact error.")
+                    send_telegram("⏳ The AI is currently cooling down from too many requests. Please try /score again in 1 minute.")
                 
     except Exception as e:
         print(f"Command Error: {e}")
 
-# =====================
-# YOUR V1 SCRAPING ENGINE
-# =====================
 def scrape_match_links():
     url = "https://www.cricbuzz.com/cricket-match/live-scores"
     try:
@@ -116,7 +115,6 @@ def scrape_instant_score(match_url):
     try:
         response = requests.get(match_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
-        # Direct implementation of your v1 score target
         score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
         if not score_div: return "Score not available yet"
         
@@ -160,7 +158,6 @@ def fetch_match_update(match_url, match_name):
         if response.status_code != 200: return
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # GET SCORE AND CURRENT OVER
         score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
         if not score_div: return
 
@@ -170,7 +167,6 @@ def fetch_match_update(match_url, match_name):
         overs = score_parts[2].get_text(strip=True).replace("(", "").replace(")", "")
         score = f"{runs}-{wickets}"
 
-        # GET LATEST EVENT
         commentary_main = soup.find("div", class_=lambda x: x and "leading-6" in x)
         if not commentary_main: return
         
@@ -190,7 +186,6 @@ def fetch_match_update(match_url, match_name):
         
         event_text = event_divs[1].get_text(strip=True)
 
-        # PREVENT DUPLICATES
         unique_id = f"{match_url}_{score}_{event_text}"
         if match_url in last_events and last_events[match_url] == unique_id:
             return
@@ -207,7 +202,7 @@ def fetch_match_update(match_url, match_name):
 
 if __name__ == "__main__":
     print("🚀 Cricket Newsroom Worker Starting...")
-    send_telegram("✅ Bot Online! Running on native Cricbuzz Scraper. Type /score to check.")
+    send_telegram("✅ Bot Online! Running on Native Scraper with Auto-Rate Limiting.")
     
     while True:
         try:
@@ -221,4 +216,5 @@ if __name__ == "__main__":
         except Exception as e:
             print("Loop Error:", e)
             
-        time.sleep(15)
+        # THE FIX: Slowed down to 60 seconds to protect your free tier limits
+        time.sleep(60)
