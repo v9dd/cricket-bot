@@ -3,9 +3,8 @@ import os
 import time
 from bs4 import BeautifulSoup
 from google import genai
-from datetime import datetime
 
-# 1. Grab Environment Variables DIRECTLY
+# 1. NO CRICKET API KEYS NEEDED
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -21,7 +20,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# State management from your v1 code
+# State management directly from your v1 code
 match_state = {}
 last_events = {}
 last_update_id = None
@@ -38,7 +37,6 @@ def get_ai_news(prompt):
     try:
         response = client.models.generate_content(
             model='gemini-2.0-flash',
-            # Enforces the locked WhatsApp format you requested previously
             contents=f"Using the exact professional WhatsApp channel format we locked in previously, write a punchy cricket news update for this raw data: {prompt}"
         )
         return response.text.strip()
@@ -63,24 +61,31 @@ def handle_commands():
             msg_data = update.get("message") or update.get("channel_post")
             if not msg_data: continue
             text = msg_data.get("text", "")
+            
             if "/score" in text:
                 send_telegram("🏏 Scraping live scores directly from Cricbuzz...")
                 
-                # Fetch instant summary using your scraper
                 matches = scrape_match_links()
                 if not matches:
-                    send_telegram("There are no live matches on Cricbuzz right now.")
-                    return
+                    send_telegram("⚠️ There are no live matches on Cricbuzz right now.")
+                    continue
                 
                 summary_data = []
+                # Scrape the actual score for each match found using your v1 logic
                 for name, link in matches[:5]:
-                    summary_data.append(name)
+                    score = scrape_instant_score(link)
+                    summary_data.append(f"{name}: {score}")
                 
-                msg = get_ai_news(f"User asked for a quick summary of current live matches: {', '.join(summary_data)}")
-                if msg: send_telegram(msg)
+                prompt = f"User asked for a live score summary. Here is the raw data: {', '.join(summary_data)}"
+                msg = get_ai_news(prompt)
                 
-    except Exception:
-        pass
+                if msg: 
+                    send_telegram(msg)
+                else:
+                    send_telegram("❌ Gemini AI failed to write the message. Please check Railway logs for the exact error.")
+                
+    except Exception as e:
+        print(f"Command Error: {e}")
 
 # =====================
 # YOUR V1 SCRAPING ENGINE
@@ -107,10 +112,25 @@ def scrape_match_links():
         print(f"Link Scrape Error: {e}")
         return []
 
+def scrape_instant_score(match_url):
+    try:
+        response = requests.get(match_url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(response.text, "html.parser")
+        # Direct implementation of your v1 score target
+        score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
+        if not score_div: return "Score not available yet"
+        
+        score_parts = score_div.find_all("div")
+        runs = score_parts[0].get_text(strip=True)
+        wickets = score_parts[1].get_text(strip=True).replace("-", "")
+        overs = score_parts[2].get_text(strip=True).replace("(", "").replace(")", "")
+        return f"{runs}-{wickets} ({overs} overs)"
+    except:
+        return "Error loading score"
+
 def fetch_toss_update(match_url, match_name):
     if match_url not in match_state:
         match_state[match_url] = {"toss_sent": False}
-
     if match_state[match_url]["toss_sent"]:
         return
 
@@ -122,7 +142,6 @@ def fetch_toss_update(match_url, match_name):
 
         soup = BeautifulSoup(response.text, "html.parser")
         toss_label = soup.find(lambda tag: tag.name == "div" and "font-bold" in tag.get("class", []) and "Toss" in tag.get_text())
-
         if not toss_label: return
 
         toss_text = toss_label.find_next("div").get_text(strip=True)
@@ -132,7 +151,7 @@ def fetch_toss_update(match_url, match_name):
         ai_msg = get_ai_news(raw_message)
         if ai_msg: send_telegram(ai_msg)
 
-    except Exception as e:
+    except Exception:
         pass
 
 def fetch_match_update(match_url, match_name):
@@ -158,7 +177,6 @@ def fetch_match_update(match_url, match_name):
         event_blocks = commentary_main.find_all("div", recursive=False)
         if not event_blocks: return
         
-        # Over summary logic from v1
         if "." in overs:
             target_block = event_blocks[0]
         else:
@@ -179,18 +197,16 @@ def fetch_match_update(match_url, match_name):
 
         last_events[match_url] = unique_id
 
-        # Send raw event to AI for formatting
         raw_message = f"{match_name} Update: Score is {score} ({overs} overs). Latest ball: {event_text}"
-        print(f"Sending to AI: {raw_message}")
         
         ai_msg = get_ai_news(raw_message)
         if ai_msg: send_telegram(ai_msg)
 
-    except Exception as e:
+    except Exception:
         pass
 
 if __name__ == "__main__":
-    print("🚀 Cricket Newsroom Worker Starting with USER V1 SCRAPER...")
+    print("🚀 Cricket Newsroom Worker Starting...")
     send_telegram("✅ Bot Online! Running on native Cricbuzz Scraper. Type /score to check.")
     
     while True:
