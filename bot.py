@@ -2,24 +2,22 @@ import requests
 import os
 import time
 from bs4 import BeautifulSoup
-from google import genai
+from datetime import datetime
 
-# 1. NO CRICKET API KEYS NEEDED
+# 1. 100% API LIMIT FREE - NO GEMINI NEEDED!
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GEMINI_API_KEY or not BOT_TOKEN:
-    print("🚨 SYSTEM HALTED: Missing Telegram or Gemini Keys!")
+if not BOT_TOKEN:
+    print("🚨 SYSTEM HALTED: Missing Telegram Token!")
     time.sleep(60)
     exit()
-
-client = genai.Client() 
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
+# State management directly from your v1 code
 match_state = {}
 last_events = {}
 last_update_id = None
@@ -28,28 +26,13 @@ def send_telegram(text):
     if not text: return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
         print(f"Telegram Error: {e}")
 
-def get_ai_news(prompt):
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=f"Using the exact professional WhatsApp channel format we locked in previously, write a punchy cricket news update for this raw data: {prompt}"
-        )
-        return response.text.strip()
-    except Exception as e:
-        error_msg = str(e)
-        print(f"Gemini Error: {error_msg}")
-        
-        # THE FIX: Automatically handle the 429 Rate Limit error gracefully
-        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-            print("⏳ Gemini API Speed Limit Hit! Pausing the bot for 60 seconds to let the quota refresh...")
-            time.sleep(60) 
-            
-        return None
-
+# =====================
+# COMMAND HANDLER
+# =====================
 def handle_commands():
     global last_update_id
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
@@ -66,7 +49,7 @@ def handle_commands():
             text = msg_data.get("text", "")
             
             if "/score" in text:
-                send_telegram("🏏 Scraping live scores directly from Cricbuzz...")
+                send_telegram("🏏 *Fetching live scores...*")
                 
                 matches = scrape_match_links()
                 if not matches:
@@ -76,19 +59,18 @@ def handle_commands():
                 summary_data = []
                 for name, link in matches[:5]:
                     score = scrape_instant_score(link)
-                    summary_data.append(f"{name}: {score}")
+                    summary_data.append(f"🔹 *{name}*\n📊 {score}")
                 
-                prompt = f"User asked for a live score summary. Here is the raw data: {', '.join(summary_data)}"
-                msg = get_ai_news(prompt)
-                
-                if msg: 
-                    send_telegram(msg)
-                else:
-                    send_telegram("⏳ The AI is currently cooling down from too many requests. Please try /score again in 1 minute.")
+                # NATIVE FORMATTING (Bypasses AI completely)
+                final_msg = "🏆 *LIVE CRICKET SCORES* 🏆\n\n" + "\n\n".join(summary_data)
+                send_telegram(final_msg)
                 
     except Exception as e:
         print(f"Command Error: {e}")
 
+# =====================
+# YOUR V1 SCRAPING ENGINE
+# =====================
 def scrape_match_links():
     url = "https://www.cricbuzz.com/cricket-match/live-scores"
     try:
@@ -108,7 +90,6 @@ def scrape_match_links():
                 matches.append((name, link))
         return matches
     except Exception as e:
-        print(f"Link Scrape Error: {e}")
         return []
 
 def scrape_instant_score(match_url):
@@ -145,9 +126,14 @@ def fetch_toss_update(match_url, match_name):
         toss_text = toss_label.find_next("div").get_text(strip=True)
         match_state[match_url]["toss_sent"] = True
 
-        raw_message = f"TOSS UPDATE: {match_name}. {toss_text}"
-        ai_msg = get_ai_news(raw_message)
-        if ai_msg: send_telegram(ai_msg)
+        # NATIVE FORMATTING FROM YOUR V1
+        message = (
+            f"🪙 *TOSS UPDATE* 🪙\n\n"
+            f"*{match_name}*\n\n"
+            f"{toss_text}\n\n"
+            f"🔗 [Match Link]({match_url})"
+        )
+        send_telegram(message)
 
     except Exception:
         pass
@@ -191,18 +177,24 @@ def fetch_match_update(match_url, match_name):
             return
 
         last_events[match_url] = unique_id
+        timestamp = datetime.now().strftime("%H:%M:%S")
 
-        raw_message = f"{match_name} Update: Score is {score} ({overs} overs). Latest ball: {event_text}"
-        
-        ai_msg = get_ai_news(raw_message)
-        if ai_msg: send_telegram(ai_msg)
+        # NATIVE FORMATTING FROM YOUR V1
+        message = (
+            f"🏏 *{match_name}*\n\n"
+            f"📊 *Score:* {score} ({overs})\n"
+            f"🔥 *Event:* {event_text}\n\n"
+            f"🕒 {timestamp}\n"
+            f"🔗 [Live Score]({match_url})"
+        )
+        send_telegram(message)
 
     except Exception:
         pass
 
 if __name__ == "__main__":
     print("🚀 Cricket Newsroom Worker Starting...")
-    send_telegram("✅ Bot Online! Running on Native Scraper with Auto-Rate Limiting.")
+    send_telegram("✅ *Bot Online!* Running cleanly with NO API Limits. Type /score to check.")
     
     while True:
         try:
@@ -216,5 +208,5 @@ if __name__ == "__main__":
         except Exception as e:
             print("Loop Error:", e)
             
-        # THE FIX: Slowed down to 60 seconds to protect your free tier limits
-        time.sleep(60)
+        # Safe 15-second loop because there are ZERO API limits now
+        time.sleep(15)
