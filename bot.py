@@ -56,7 +56,6 @@ def get_ai_news(prompt):
 def handle_commands():
     global last_update_id
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-    # Using a timeout keeps the connection open briefly to catch instant messages
     params = {"timeout": 5} 
     
     if last_update_id:
@@ -69,42 +68,21 @@ def handle_commands():
         for update in res.get("result", []):
             last_update_id = update["update_id"]
             
-            if "message" not in update: continue
+            # THE FIX: Check for BOTH regular messages AND channel posts
+            msg_data = update.get("message") or update.get("channel_post")
             
-            text = update["message"].get("text", "")
-            if text.startswith("/score"):
+            if not msg_data: 
+                continue
+            
+            text = msg_data.get("text", "")
+            
+            # Made this more flexible in case you type it with a space or tag
+            if "/score" in text:
                 send_telegram("🏏 Let me check the live scores for you...")
                 fetch_live_summary()
                 
     except Exception as e:
-        pass
-
-def fetch_live_summary():
-    url = f"https://{RAPID_HOST}/matches/v1/live"
-    headers = {"X-RapidAPI-Key": RAPID_API_KEY, "X-RapidAPI-Host": RAPID_HOST}
-    
-    try:
-        res = requests.get(url, headers=headers, timeout=15).json()
-        intl = [s for s in res.get('typeMatches', []) if s.get('matchType') == 'intl']
-        
-        matches_found = []
-        for section in intl:
-            for match in section.get('seriesMatches', []):
-                m = match.get('seriesAdWrapper', {}).get('matchScoreDetails', {})
-                if not m: continue
-                
-                name = f"{m['team1ShortName']} vs {m['team2ShortName']}"
-                state = m.get('matchState', 'Live')
-                matches_found.append(f"{name} ({state})")
-        
-        if not matches_found:
-            send_telegram("There are no live international matches at the moment.")
-            return
-            
-        prompt = f"User asked for a score update. Here are the live matches: {', '.join(matches_found)}. Write a very brief, punchy bulleted summary."
-        send_telegram(get_ai_news(prompt))
-    except Exception as e:
-        send_telegram("⚠️ Sorry, I hit an error pulling the scores.")
+        print(f"Command Error: {e}")
 
 # =====================
 # BACKGROUND POLLING
