@@ -11,7 +11,7 @@ from datetime import datetime
 # =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") # NEW: Your Groq API Key
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") # Ensure this is in your Railway/Environment variables
 
 if not BOT_TOKEN:
     print("🚨 SYSTEM HALTED: Missing Telegram Token!")
@@ -35,27 +35,44 @@ match_state = {}
 last_update_id = None
 
 # =====================
-# AI EDITOR (LLAMA-3.3-70B)
+# AI EDITOR (NARRATIVE STYLE)
 # =====================
 def get_pro_edit(text):
     if not GROQ_API_KEY: return None
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
-    prompt = f"""
-    You are a professional Cricket News Editor for a viral WhatsApp Channel.
-    Rewrite this match update to be exciting, urgent, and viral. 
-    Use cricket emojis, bolding for key stats, and clear structure.
-    Keep it concise for WhatsApp formatting. Do not change any numbers or facts.
-    
-    RAW UPDATE DATA: {text}
-    """
+    prompt = f"""You are a professional Cricket News Editor for a viral WhatsApp Channel.
+Rewrite the raw match update into a short, crisp, narrative-style post. Do NOT use bullet points or lists. 
+
+Follow this EXACT format and tone based on these examples:
+
+Example 1:
+🏏 TOSS UPDATE – ENG vs SL 🏏 
+Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
+A massive game in Group 2 to kick off the business end. Game on! 
+
+Example 2:
+🏏 10 OVER UPDATE – ENG vs SL 🏏 
+England find themselves in a tough spot, reaching 68/4 after 10 overs.
+The batting team is trying to build a fightback, but the bowlers have dominated the phase with crucial wickets.
+
+Rules for your rewrite:
+1. Create ONE clear heading with emojis (e.g., 🏏 [PHASE/EVENT] – [MATCH NAME] 🏏).
+2. Write 1 or 2 short, punchy paragraphs summarizing the current state of the game. 
+3. Weave the score, runs, and wickets smoothly into the sentences. DO NOT use rigid labels like "Score: X" or "Overs: Y".
+4. Strictly NO bullet points. 
+5. End with a short concluding hype sentence.
+
+RAW UPDATE DATA to rewrite:
+{text}
+"""
     
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.6,
-        "max_tokens": 1024
+        "temperature": 0.5, 
+        "max_tokens": 500
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=10)
@@ -76,7 +93,7 @@ def send_telegram(text, pro_edit=False):
         requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": "true"}, timeout=10)
     except: pass
 
-    # 2. If it's a major update, fetch and send the AI version
+    # 2. If requested, fetch and send the AI version
     if pro_edit and GROQ_API_KEY:
         ai_text = get_pro_edit(text)
         if ai_text:
@@ -85,17 +102,15 @@ def send_telegram(text, pro_edit=False):
             except: pass
 
 def get_img_link(query):
-    safe_query = urllib.parse.quote(f"{query} Cricket Match 2026")
+    safe_query = urllib.parse.quote(f"{query} Cricket Match {datetime.now().year}")
     return f"https://www.google.com/search?q={safe_query}&tbm=isch"
 
-def is_international_text_check(text):
-    title = text.upper()
-    if any(x in title for x in ["WOMEN", " U19", "TROPHY", "LEAGUE"]): return False
-    intl_formats = ["TEST", "ODI", "T20I", "WORLD CUP"]
-    if any(fmt in title for fmt in intl_formats): return True
+def is_intl(text):
+    t = text.upper()
+    if any(x in t for x in ["WOMEN", " U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A"]): return False
+    if any(f in t for f in ["TEST", "ODI", "T20I", "WORLD CUP"]): return True
     countries = ["INDIA", "AUSTRALIA", "ENGLAND", "NEW ZEALAND", "SOUTH AFRICA", "PAKISTAN", "SRI LANKA", "WEST INDIES", "BANGLADESH", "ZIMBABWE", "AFGHANISTAN", "IRELAND"]
-    if sum(1 for c in countries if c in title) >= 2: return True
-    return False
+    return sum(1 for c in countries if c in t) >= 2
 
 # =====================
 # DAILY BRIEFING FEATURE
@@ -120,7 +135,7 @@ def scrape_todays_schedule():
             
             for match in match_list.find_all("div", class_="cb-ovr-flo"):
                 match_info = match.get_text(strip=True)
-                if is_international_text_check(match_info):
+                if is_intl(match_info):
                     todays_matches.append(f"• {match_info}")
         
         if not todays_matches:
@@ -215,7 +230,7 @@ def handle_commands():
     except: pass
 
 # =====================
-# SCRAPING ENGINE & TEMPLATES
+# SCRAPING ENGINE
 # =====================
 def scrape_match_links():
     try:
@@ -384,8 +399,8 @@ def fetch_match_update(match_url, match_name):
     except: pass
 
 if __name__ == "__main__":
-    print("🚀 WhatsApp Content Assistant + Groq AI Online!")
-    send_telegram("✅ *Content Assistant Online!*\nAdvanced Filtering, Dynamic Images, and AI Edits are all ACTIVE.")
+    print("🚀 WhatsApp Editor Bot + Groq Llama-3.3-70B Active!")
+    send_telegram("✅ *Content Assistant Online!*\nSmart T20 Logic, Narrative AI Edits, and Image Fetching are fully ACTIVE.")
     while True:
         try:
             handle_commands()
