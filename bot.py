@@ -22,8 +22,9 @@ conn = sqlite3.connect("cricket_final.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, last_wickets INTEGER, toss_done INTEGER DEFAULT 0)")
-# Added table to track daily briefings
 cursor.execute("CREATE TABLE IF NOT EXISTS daily_logs (date TEXT PRIMARY KEY)")
+# NEW: Table for Tracking Management
+cursor.execute("CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)")
 conn.commit()
 
 match_state = {}
@@ -37,15 +38,13 @@ def send_telegram(text):
     except: pass
 
 # =====================
-# NEW: 8 AM SCHEDULE SCRAPER
+# DAILY BRIEFING FEATURE
 # =====================
 def scrape_todays_schedule():
     url = "https://www.cricbuzz.com/cricket-schedule"
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Format today's date to match Cricbuzz (e.g., "MON FEB 23")
         today_str = datetime.now().strftime("%a %b %d").upper()
         
         schedule_blocks = soup.find_all("div", class_="cb-col-100 cb-col cb-schdl")
@@ -56,7 +55,6 @@ def scrape_todays_schedule():
             if not date_header or today_str not in date_header.get_text().upper():
                 continue
             
-            # Found today's block, now extract international matches
             match_list = block.find_next_sibling("div")
             if not match_list: continue
             
@@ -70,10 +68,7 @@ def scrape_todays_schedule():
             
         header = f"📅 *TODAY'S INTERNATIONAL SCHEDULE*\n_{datetime.now().strftime('%d %B %Y')}_\n\n"
         return header + "\n".join(todays_matches)
-        
-    except Exception as e:
-        print("Schedule Scrape Error:", e)
-        return None
+    except: return None
 
 def is_international_text_check(text):
     title = text.upper()
@@ -87,12 +82,9 @@ def is_international_text_check(text):
 def handle_daily_briefing():
     now = datetime.now()
     today_date = now.strftime("%Y-%m-%d")
-    
-    # Trigger briefing during the 8:00 AM hour
     if now.hour == 8:
         row = cursor.execute("SELECT date FROM daily_logs WHERE date=?", (today_date,)).fetchone()
         if not row:
-            print(f"🌅 Generating 8 AM Daily Briefing for {today_date}...")
             brief = scrape_todays_schedule()
             if brief:
                 send_telegram(brief)
@@ -100,7 +92,7 @@ def handle_daily_briefing():
                 conn.commit()
 
 # =====================
-# COMMAND HANDLER
+# COMMAND HANDLER (TRACKING MANAGER)
 # =====================
 def handle_commands():
     global last_update_id
@@ -115,24 +107,64 @@ def handle_commands():
             
             msg_data = update.get("message") or update.get("channel_post")
             if not msg_data: continue
-            
-            if "/score" in msg_data.get("text", ""):
+            text = msg_data.get("text", "")
+
+            # 1. SHOW TRACK LIST
+            if "/tracklist" in text:
+                matches = scrape_match_links()
+                if not matches:
+                    send_telegram("📭 No international matches found to track.")
+                    continue
+                
+                report = "📋 *TRACKING MANAGER*\n\n"
+                for i, (name, link) in enumerate(matches):
+                    m_id = link.split("/")[-2]
+                    row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
+                    # Default to tracking (1) if not in DB
+                    status = "✅ Tracking" if (not row or row[0] == 1) else "❌ Muted"
+                    report += f"*{i+1}.* {name}\nStatus: {status}\nToggle: `/track {i+1}` or `/stop {i+1}`\n\n"
+                send_telegram(report)
+
+            # 2. START TRACKING
+            elif "/track" in text:
+                try:
+                    idx = int(text.split()[-1]) - 1
+                    matches = scrape_match_links()
+                    name, link = matches[idx]
+                    m_id = link.split("/")[-2]
+                    cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 1)", (m_id, name))
+                    conn.commit()
+                    send_telegram(f"✅ Now tracking: *{name}*")
+                except: send_telegram("⚠️ Invalid ID. Use `/tracklist` to see IDs.")
+
+            # 3. STOP TRACKING
+            elif "/stop" in text:
+                try:
+                    idx = int(text.split()[-1]) - 1
+                    matches = scrape_match_links()
+                    name, link = matches[idx]
+                    m_id = link.split("/")[-2]
+                    cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, name))
+                    conn.commit()
+                    send_telegram(f"❌ Muted: *{name}*")
+                except: send_telegram("⚠️ Invalid ID. Use `/tracklist` to see IDs.")
+
+            # 4. BASIC SCORE COMMAND
+            elif "/score" in text:
                 send_telegram("🏏 *Fetching live international scores...*")
                 matches = scrape_match_links()
                 if not matches:
                     send_telegram("⚠️ There are no live international matches playing right now.")
                     continue
-                
                 summary_data = []
                 for name, link in matches[:5]:
                     score = scrape_instant_score(link)
                     summary_data.append(f"🔹 *{name}*\n📊 {score}")
-                
                 send_telegram("🏆 *LIVE INTERNATIONAL SCORES* 🏆\n\n" + "\n\n".join(summary_data))
     except: pass
 
 # =====================
-# SCRAPING ENGINE
+# SCRAPING ENGINE (NATIVE CRICBUZZ)
 # =====================
 def scrape_match_links():
     try:
@@ -146,11 +178,9 @@ def scrape_match_links():
             block_text = block.get_text(separator=" ", strip=True).upper()
             if not block_text.startswith("INTERNATIONAL") and not block_text.startswith("ICC"):
                 continue
-                
             for card in block.select("a.w-full.bg-cbWhite"):
                 name = card.get("title", "").strip()
-                if not name: continue
-                if "WOMEN" in name.upper() or " U19" in name.upper():
+                if not name or "WOMEN" in name.upper() or " U19" in name.upper():
                     continue
                 matches.append((name, "https://www.cricbuzz.com" + card["href"]))
         return matches
@@ -162,7 +192,6 @@ def scrape_instant_score(match_url):
         soup = BeautifulSoup(response.text, "html.parser")
         score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
         if not score_div: return "Score not available yet"
-        
         p = score_div.find_all("div")
         runs = p[0].get_text(strip=True)
         wickets = p[1].get_text(strip=True).replace("-", "")
@@ -191,7 +220,6 @@ def fetch_match_update(match_url, match_name):
     try:
         response = requests.get(match_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
-        
         score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
         if not score_div: return
         p = score_div.find_all("div")
@@ -261,15 +289,24 @@ def fetch_match_update(match_url, match_name):
 
 if __name__ == "__main__":
     print("🚀 Pro-Tier Cricket Bot Starting...")
-    send_telegram("✅ *Bot Online!* Advanced Category Filters & Daily 8 AM Schedule active.")
+    send_telegram("✅ *Bot Online!* Advanced Filtering, Daily Schedule, and Tracking Manager active.")
     while True:
         try:
             handle_commands()
-            handle_daily_briefing() # New feature check
+            handle_daily_briefing()
+            
             matches = scrape_match_links()
             for name, link in matches:
+                m_id = link.split("/")[-2]
+                
+                # Check Tracking Status: skip if muted (0)
+                row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
+                if row and row[0] == 0:
+                    continue 
+                
                 fetch_toss_update(link, name)
                 fetch_match_update(link, name)
+                
         except Exception as e:
             print("Loop Error:", e)
         time.sleep(15)
