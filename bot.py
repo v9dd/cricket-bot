@@ -2,7 +2,7 @@ import os
 import time
 import sqlite3
 import requests
-import google.generativeai as genai
+from google import genai
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -15,9 +15,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RAPID_API_KEY = os.getenv("RAPID_API_KEY")
 RAPID_HOST = "cricbuzz-cricket.p.rapidapi.com"
 
-# 2. Setup Gemini AI
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+# 2. Setup Gemini AI using the NEW google-genai library
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # 3. Database Setup (Persists safely on Railway)
 conn = sqlite3.connect("cricket.db", check_same_thread=False)
@@ -36,9 +35,15 @@ def send_telegram(text):
 
 def get_ai_news(prompt):
     try:
-        res = model.generate_content(f"Format this as professional cricket news for WhatsApp: {prompt}")
-        return res.text.strip()
-    except: return None
+        # Updated syntax for the new google-genai SDK
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=f"Format this as professional cricket news for WhatsApp: {prompt}"
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini Error: {e}")
+        return None
 
 def process_matches():
     url = f"https://{RAPID_HOST}/matches/v1/live"
