@@ -5,33 +5,31 @@ import requests
 from google import genai
 from datetime import datetime
 
-# 1. Grab Environment Variables DIRECTLY (No dotenv needed on Railway)
+# 1. Grab Environment Variables DIRECTLY
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RAPID_API_KEY = os.getenv("RAPID_API_KEY")
 RAPID_HOST = "cricbuzz-cricket.p.rapidapi.com"
 
-# --- SAFETY CHECK: Prevent confusing crashes ---
+# --- SAFETY CHECK ---
 if not GEMINI_API_KEY or not RAPID_API_KEY or not BOT_TOKEN:
     print("🚨 SYSTEM HALTED: Missing API Keys!")
-    print(f"BOT_TOKEN: {'✅ Loaded' if BOT_TOKEN else '❌ MISSING'}")
-    print(f"GEMINI_API_KEY: {'✅ Loaded' if GEMINI_API_KEY else '❌ MISSING'}")
-    print(f"RAPID_API_KEY: {'✅ Loaded' if RAPID_API_KEY else '❌ MISSING'}")
-    print("Waiting 60 seconds for Railway to finish deploying your new keys...")
     time.sleep(60)
     exit()
 
 # 2. Setup Gemini AI 
-# The new library automatically finds GEMINI_API_KEY from the environment
 client = genai.Client() 
 
-# 3. Database Setup (Persists safely on Railway)
+# 3. Database Setup
 conn = sqlite3.connect("cricket.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, toss_done INTEGER DEFAULT 0)")
 conn.commit()
+
+# --- NEW: Command Tracking ---
+last_update_id = None
 
 def send_telegram(text):
     if not text: return
@@ -52,6 +50,65 @@ def get_ai_news(prompt):
         print(f"Gemini Error: {e}")
         return None
 
+# =====================
+# COMMAND HANDLER
+# =====================
+def handle_commands():
+    global last_update_id
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+    # Using a timeout keeps the connection open briefly to catch instant messages
+    params = {"timeout": 5} 
+    
+    if last_update_id:
+        params["offset"] = last_update_id + 1
+        
+    try:
+        res = requests.get(url, params=params, timeout=10).json()
+        if not res.get("ok"): return
+        
+        for update in res.get("result", []):
+            last_update_id = update["update_id"]
+            
+            if "message" not in update: continue
+            
+            text = update["message"].get("text", "")
+            if text.startswith("/score"):
+                send_telegram("🏏 Let me check the live scores for you...")
+                fetch_live_summary()
+                
+    except Exception as e:
+        pass
+
+def fetch_live_summary():
+    url = f"https://{RAPID_HOST}/matches/v1/live"
+    headers = {"X-RapidAPI-Key": RAPID_API_KEY, "X-RapidAPI-Host": RAPID_HOST}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=15).json()
+        intl = [s for s in res.get('typeMatches', []) if s.get('matchType') == 'intl']
+        
+        matches_found = []
+        for section in intl:
+            for match in section.get('seriesMatches', []):
+                m = match.get('seriesAdWrapper', {}).get('matchScoreDetails', {})
+                if not m: continue
+                
+                name = f"{m['team1ShortName']} vs {m['team2ShortName']}"
+                state = m.get('matchState', 'Live')
+                matches_found.append(f"{name} ({state})")
+        
+        if not matches_found:
+            send_telegram("There are no live international matches at the moment.")
+            return
+            
+        prompt = f"User asked for a score update. Here are the live matches: {', '.join(matches_found)}. Write a very brief, punchy bulleted summary."
+        send_telegram(get_ai_news(prompt))
+    except Exception as e:
+        send_telegram("⚠️ Sorry, I hit an error pulling the scores.")
+
+# =====================
+# BACKGROUND POLLING
+# =====================
 def process_matches():
     url = f"https://{RAPID_HOST}/matches/v1/live"
     headers = {"X-RapidAPI-Key": RAPID_API_KEY, "X-RapidAPI-Host": RAPID_HOST}
@@ -70,7 +127,7 @@ def process_matches():
                 
                 process_single_match(m_id, m_name)
     except Exception as e:
-        print(f"Fetch Error: {e}")
+        pass
 
 def process_single_match(m_id, m_name):
     url = f"https://{RAPID_HOST}/mcenter/v1/{m_id}/comm"
@@ -85,7 +142,6 @@ def process_single_match(m_id, m_name):
         row = cursor.execute("SELECT last_over, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
         last_over, toss_done = (row[0], row[1]) if row else (0.0, 0)
 
-        # 1. Toss Logic
         if not toss_done:
             status = score_info.get('matchHeader', {}).get('status', "")
             if "won the toss" in status.lower():
@@ -96,7 +152,6 @@ def process_single_match(m_id, m_name):
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
                     toss_done = 1
 
-        # 2. Over Milestones
         if int(cur_overs // 10) > int(last_over // 10) and cur_overs >= 10:
             m_stone = int((cur_overs // 10) * 10)
             eid = f"{m_id}_O_{m_stone}"
@@ -105,7 +160,6 @@ def process_single_match(m_id, m_name):
                 send_telegram(msg)
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 3. Commentary Milestones (50s / 100s)
         for comm in data.get('commentaryList', [])[:5]:
             comm_text = comm.get('commText', "")
             event_type = None
@@ -119,7 +173,6 @@ def process_single_match(m_id, m_name):
                     send_telegram(msg)
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # Update State
         cursor.execute("INSERT OR REPLACE INTO state VALUES (?,?,?)", (m_id, cur_overs, toss_done))
         conn.commit()
     except Exception as e:
@@ -127,7 +180,8 @@ def process_single_match(m_id, m_name):
 
 if __name__ == "__main__":
     print("🚀 Cricket Newsroom Worker Starting...")
-    send_telegram("✅ Cricket Newsroom Bot is now online and monitoring matches!")
+    send_telegram("✅ Cricket Newsroom Bot is now online. Type /score to check live matches!")
     while True:
-        process_matches()
-        time.sleep(30)
+        handle_commands() # Listens for /score
+        process_matches() # Checks for milestones
+        time.sleep(25)
