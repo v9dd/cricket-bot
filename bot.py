@@ -21,7 +21,7 @@ if not BOT_TOKEN:
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =====================
-# DATABASE SETUP
+# DATABASE SETUP & UPGRADE
 # =====================
 conn = sqlite3.connect("cricket_final.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -29,6 +29,12 @@ cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, last_wickets INTEGER, toss_done INTEGER DEFAULT 0)")
 cursor.execute("CREATE TABLE IF NOT EXISTS daily_logs (date TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)")
+
+# Upgrade state table for Double Strike tracking if needed
+try:
+    cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
+except:
+    pass # Column already exists
 conn.commit()
 
 match_state = {}
@@ -83,7 +89,7 @@ def send_telegram(text, pro_edit=False):
     if not text: return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     
-    # Send Original Raw Template (The Fail-Safe)
+    # Send Original Raw Template
     try:
         requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": "true"}, timeout=10)
     except: pass
@@ -250,7 +256,6 @@ def scrape_instant_score(match_url):
         overs = p[2].get_text(strip=True).replace("(", "").replace(")", "") if len(p) > 2 else ""
         score_str = f"📊 {runs}-{wickets} ({overs} overs)"
 
-        # Bulletproof event text extraction
         event_text = ""
         status_div = soup.find("div", class_=lambda x: x and any(c in x for c in ["text-cb-danger", "text-cb-info", "text-cb-success"]))
         if status_div: event_text = status_div.get_text(strip=True)
@@ -283,7 +288,6 @@ def fetch_match_update(match_url, match_name):
         response = requests.get(match_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # BULLETPROOF SCORE PARSING
         score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
         if not score_div: return
         p = score_div.find_all("div")
@@ -303,14 +307,11 @@ def fetch_match_update(match_url, match_name):
         cur_overs = float(overs_raw) if overs_raw.replace('.', '', 1).isdigit() else 0.0
         score_display = f"{runs}/{wickets}"
 
-        # BULLETPROOF EVENT TEXT EXTRACTION
         event_text = ""
-        # 1. Try finding status div directly (captures "Innings Break" perfectly)
         status_div = soup.find("div", class_=lambda x: x and any(c in x for c in ["text-cb-danger", "text-cb-info", "text-cb-success"]))
         if status_div:
             event_text = status_div.get_text(strip=True)
             
-        # 2. If no status div, fallback to commentary
         if not event_text:
             cm = soup.find("div", class_=lambda x: x and "leading-6" in x)
             if cm:
@@ -325,34 +326,61 @@ def fetch_match_update(match_url, match_name):
         event_lower = event_text.lower()
 
         m_id = match_url.split("/")[-2] if "/" in match_url else str(hash(match_name))
-        row = cursor.execute("SELECT last_over, last_wickets, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
-        last_ov, last_wk, toss_done = row if row else (0.0, 0, 0)
+        
+        # Pull state with last_wicket_over for Double Strike logic
+        try:
+            row = cursor.execute("SELECT last_over, last_wickets, toss_done, last_wicket_over FROM state WHERE m_id=?", (m_id,)).fetchone()
+            last_ov, last_wk, toss_done, last_wk_ov = row if row else (0.0, 0, 0, -10.0)
+        except:
+            row = cursor.execute("SELECT last_over, last_wickets, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
+            last_ov, last_wk, toss_done = row if row else (0.0, 0, 0)
+            last_wk_ov = -10.0
         
         # Reset logic for 2nd Innings
         if cur_overs < last_ov - 5: 
             last_ov = 0.0
             last_wk = 0
+            last_wk_ov = -10.0
             
         msg = None
         is_match_over = any(phrase in event_lower for phrase in ["won by", "win by", "match drawn", "match tied", "abandoned", "no result"])
         
-        # 1. MATCH END
-        if is_match_over:
+        # 1. NEW LOGIC: EARLY COLLAPSE & DOUBLE STRIKE
+        if wickets > last_wk:
+            new_wk_ov = cur_overs
+            
+            # Condition A: Early Collapse (3 Wickets in Powerplay)
+            if wickets == 3 and cur_overs <= 6.0:
+                eid = f"{m_id}_COLLAPSE_3WK"
+                if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                    msg = f"🚨 *EARLY COLLAPSE* 🚨\n—————————————————\n💥 Huge trouble early on!\n\n🏏 *MATCH:* {match_name}\n📊 *SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST WICKET:* _{event_text}_\n\n🖼 [Tap for Match Action]({get_img_link(match_name)})\n—————————————————\n📉 *The batting side is under massive pressure!*"
+                    cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+                    
+            # Condition B: Double Strike (2 wickets fall within 1.0 overs)
+            elif last_wk_ov > 0 and (new_wk_ov - last_wk_ov) <= 1.0 and wickets > 1:
+                eid = f"{m_id}_DOUBLE_STRIKE_{wickets}"
+                if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                    msg = f"🔥 *DOUBLE STRIKE* 🔥\n—————————————————\n🎯 Two quick wickets have changed the momentum!\n\n🏏 *MATCH:* {match_name}\n📊 *NEW SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST:* _{event_text}_\n\n🖼 [Tap for Celebration Photos]({get_img_link(match_name)})\n—————————————————\n⚠️ *Huge turning point in the game!*"
+                    cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+            
+            last_wk_ov = new_wk_ov # Update the over tracker for the next check
+
+        # 2. MATCH END
+        if not msg and is_match_over:
             eid = f"{m_id}_MATCH_END"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{event_text}*\n\n📊 *FINAL TALLY:*\n🔹 {match_name}\n🔹 Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Follow us for more cricket updates!*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 2. INNINGS BREAK (Robust Check)
-        elif any(phrase in event_lower for phrase in ["innings break", "target", "stumps", "lunch", "tea"]):
-            # Use 'runs' in ID to ensure it only triggers once per innings (prevents spam if over changes slightly)
+        # 3. INNINGS BREAK
+        elif not msg and any(phrase in event_lower for phrase in ["innings break", "target", "stumps", "lunch", "tea"]):
             eid = f"{m_id}_INNINGS_BREAK_{runs}" 
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🛑 *INNINGS COMPLETED* 🛑\n—————————————————\n🏏 *{match_name}* finishes their innings.\n\n📊 *FINAL SCORE:* *{score_display}*\n🎯 *UPDATE:* _{event_text}_\n\n🖼 [Tap for Match Gallery]({get_img_link(match_name)})\n—————————————————\n🕒 _Second innings starts shortly. Who's winning this?_"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 3. SMART OVER MILESTONES (T20 vs ODI/Test)
-        else:
+        # 4. SMART OVER MILESTONES
+        elif not msg:
             is_t20 = "T20" in match_name.upper()
             milestones = [6, 10, 15, 20] if is_t20 else [10, 20, 30, 40, 50, 60, 70, 80, 90]
             
@@ -368,7 +396,6 @@ def fetch_match_update(match_url, match_name):
                     try: crr = f"{(int(runs) / cur_overs):.2f}"
                     except: crr = "N/A"
                     
-                    # RENAME FEATURE EXECUTED HERE
                     phase_header = f"{passed_m}-OVER"
                     if is_t20 and passed_m == 6: phase_header = "POWERPLAY END"
                     elif is_t20 and passed_m in [15, 20]: phase_header = "DEATH OVERS"
@@ -376,27 +403,50 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 4. PLAYER MILESTONES
-        event_type = None
-        if any(x in event_lower for x in ["fifty", "half-century", "half century", "50 runs", "reaches 50"]): 
-            event_type = "50"
-        elif any(x in event_lower for x in ["century", "hundred", "100 runs", "reaches 100"]): 
-            event_type = "100"
-        
-        if event_type:
-            eid = f"{m_id}_MILESTONE_{hash(event_text)}"
-            if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
-                msg = f"🔥 *{event_type} REACHED!* 🔥\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *A brilliant innings! Share the news!*"
-                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+        # 5. NEW LOGIC: PLAYER MILESTONES & "RAPID FIRE"
+        if not msg:
+            event_type = None
+            speed_alert = ""
+            
+            # Extract numbers from commentary to check balls faced
+            import re
+            balls_faced = 999 
+            ball_match = re.search(r'(\d+)\s*(balls|b)', event_lower)
+            if ball_match:
+                balls_faced = int(ball_match.group(1))
+
+            if any(x in event_lower for x in ["fifty", "half-century", "half century", "50 runs", "reaches 50"]): 
+                event_type = "50"
+                if balls_faced <= 25: speed_alert = "⚡ EXPLOSIVE INNINGS ⚡\n"
+            elif any(x in event_lower for x in ["century", "hundred", "100 runs", "reaches 100"]): 
+                event_type = "100"
+                if balls_faced <= 50: speed_alert = "⚡ SENSATIONAL CENTURY ⚡\n"
+            
+            if event_type:
+                eid = f"{m_id}_MILESTONE_{hash(event_text)}"
+                if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                    header = f"🔥 *{event_type} REACHED!* 🔥"
+                    if speed_alert: header = f"{speed_alert}{header}"
+                    
+                    msg = f"{header}\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *What a knock! Share the news!*"
+                    cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
         if msg: send_telegram(msg, pro_edit=True)
-        cursor.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", (m_id, cur_overs, wickets, toss_done))
+        
+        # Save exact state to DB, including the new last_wicket_over
+        try:
+            cursor.execute("INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)", (m_id, cur_overs, wickets, toss_done, last_wk_ov))
+        except:
+            # Fallback if DB didn't alter properly
+            cursor.execute("INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done) VALUES (?,?,?,?)", (m_id, cur_overs, wickets, toss_done))
+            
         conn.commit()
-    except: pass
+    except Exception as e:
+        print("Scrape Error:", e)
 
 if __name__ == "__main__":
     print("🚀 WhatsApp Content Assistant & Narrative AI Engine Starting...")
-    send_telegram("✅ *Content Assistant Online!*\n- Tracking Commands Active (/tracklist, /track)\n- AI Editor (Narrative Style) Active\n- Dynamic Image Links Active")
+    send_telegram("✅ *Content Assistant Online!*\n- Rapid Fire Tracking Active ⚡\n- Double Strike Alerts Active 🔥\n- AI Editor (Narrative Style) Active\n- Dynamic Image Links Active")
     
     while True:
         try:
