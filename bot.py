@@ -20,9 +20,8 @@ if not BOT_TOKEN:
     exit()
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-# Fix 1: Hardcode Indian Standard Time (IST) so 8 AM is actually 8 AM
 IST = timezone(timedelta(hours=5, minutes=30))
+
 def get_ist_now():
     return datetime.now(IST)
 
@@ -63,7 +62,7 @@ def get_pro_edit(text: str, team_batting: str = None) -> str | None:
     if team_batting:
         context_hint = (
             f"\nTEAM CONTEXT: {team_batting} is batting. "
-            f"If wickets fall, frame it as pressure or crisis for {team_batting}. "
+            f"If wickets fall, frame it as pressure. "
             f"If scoring freely, frame it as dominance."
         )
 
@@ -81,6 +80,7 @@ STYLE:
 • Professional sports journalism tone
 • Natural integration of score, overs, wickets, and match situation
 • No bullet points, no lists
+• Do not invent "upsets" unless specifically stated in the data.
 
 EXAMPLE OUTPUT:
 🏏 COLLAPSE! – AUS vs IND 🏏
@@ -97,7 +97,7 @@ MATCH DATA: {clean_data}"""
             {"role": "system", "content": "You are an elite cricket news editor."},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.6,
+        "temperature": 0.5,
         "max_tokens": 180,
         "top_p": 0.9
     }
@@ -135,7 +135,6 @@ def get_img_link(query):
 
 def is_international_text_check(text):
     title = text.upper()
-    # Removed "WOMEN" so it tracks female international matches too
     if any(x in title for x in [" U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A", "ENGLAND LIONS"]): return False
     intl_formats = ["TEST", "ODI", "T20I", "WORLD CUP"]
     if any(fmt in title for fmt in intl_formats): return True
@@ -253,7 +252,6 @@ def handle_commands():
 # SCRAPING ENGINE (BULLETPROOF)
 # =====================
 def scrape_match_links():
-    # Fix 2: Bypassing Cricbuzz layout changes by finding ALL raw links
     try:
         res = requests.get("https://www.cricbuzz.com/cricket-match/live-scores", headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
@@ -268,7 +266,6 @@ def scrape_match_links():
                 
                 if name and is_international_text_check(name):
                     full_link = "https://www.cricbuzz.com" + href if href.startswith("/") else href
-                    # Prevent duplicates
                     if not any(full_link == m[1] for m in matches):
                         matches.append((name, full_link))
         return matches
@@ -280,7 +277,6 @@ def scrape_instant_score(match_url):
     try:
         response = requests.get(match_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
-        # Added a fallback class search in case they drop 'text-3xl'
         score_div = soup.find("div", class_=lambda x: x and (("text-3xl" in x and "font-bold" in x) or "cb-font-20" in x))
         if not score_div: return "Score not available yet"
         
@@ -376,13 +372,18 @@ def fetch_match_update(match_url, match_name):
 
         m_id = match_url.split("/")[-2] if "/" in match_url else str(hash(match_name))
         
+        # FIX 1: Detect if this is a newly fetched old match to prevent startup spam
+        is_new_match = False
         try:
             row = cursor.execute("SELECT last_over, last_wickets, toss_done, last_wicket_over FROM state WHERE m_id=?", (m_id,)).fetchone()
-            last_ov, last_wk, toss_done, last_wk_ov = row if row else (0.0, 0, 0, -10.0)
+            if row:
+                last_ov, last_wk, toss_done, last_wk_ov = row
+            else:
+                last_ov, last_wk, toss_done, last_wk_ov = (0.0, 0, 0, -10.0)
+                is_new_match = True
         except:
-            row = cursor.execute("SELECT last_over, last_wickets, toss_done FROM state WHERE m_id=?", (m_id,)).fetchone()
-            last_ov, last_wk, toss_done = row if row else (0.0, 0, 0)
-            last_wk_ov = -10.0
+            last_ov, last_wk, toss_done, last_wk_ov = (0.0, 0, 0, -10.0)
+            is_new_match = True
         
         if cur_overs < last_ov - 5: 
             last_ov = 0.0
@@ -394,9 +395,19 @@ def fetch_match_update(match_url, match_name):
         is_match_over = any(phrase in status_lower for phrase in ["won by", "win by", "drawn", "tied", "abandoned", "no result"])
         is_innings_break = (wickets == 10 and not is_match_over) or any(phrase in status_lower for phrase in ["innings break", "target", "stumps", "lunch", "tea"])
         
-        if wickets > last_wk:
+        # ---------------------------------------------------------------------------------
+        # ANTI-SPAM SHIELD: If it's an old/finished match we just found, SILENTLY save it.
+        # ---------------------------------------------------------------------------------
+        if is_new_match and is_match_over:
+            cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_MATCH_END",))
+            cursor.execute("INSERT OR IGNORE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)", (m_id, cur_overs, wickets, toss_done, last_wk_ov))
+            conn.commit()
+            return # Exit completely to avoid ANY spam
+
+        # A. EARLY COLLAPSE & DOUBLE STRIKE (Protected against restart spam)
+        if wickets > last_wk and not is_new_match:
             new_wk_ov = cur_overs
-            if wickets == 3 and cur_overs <= 6.0:
+            if wickets == 3 and cur_overs <= 6.0 and last_wk < 3:
                 eid = f"{m_id}_COLLAPSE_3WK"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                     msg = f"🚨 *EARLY COLLAPSE* 🚨\n—————————————————\n💥 Huge trouble early on!\n\n🏏 *MATCH:* {match_name}\n📊 *SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST WICKET:* _{event_text}_\n\n🖼 [Tap for Match Action]({get_img_link(match_name)})\n—————————————————\n📉 *The batting side is under massive pressure!*"
@@ -408,18 +419,21 @@ def fetch_match_update(match_url, match_name):
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
             last_wk_ov = new_wk_ov 
 
+        # B. MATCH END (Fixed ID to strictly prevent looping spam)
         if not msg and is_match_over:
-            eid = f"{m_id}_MATCH_END_{status_text[:10]}"
+            eid = f"{m_id}_MATCH_END"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n📊 *FINAL TALLY:*\n🔹 {match_name}\n🔹 Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Follow us for more cricket updates!*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
+        # C. INNINGS BREAK
         elif not msg and is_innings_break:
             eid = f"{m_id}_INNINGS_BREAK_{runs}" 
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🛑 *INNINGS COMPLETED* 🛑\n—————————————————\n🏏 *{match_name}* finishes their innings.\n\n📊 *FINAL SCORE:* *{score_display}*\n🎯 *UPDATE:* _{status_text}_\n\n🖼 [Tap for Match Gallery]({get_img_link(match_name)})\n—————————————————\n🕒 _Second innings starts shortly. Who's winning this?_"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
+        # D. SMART OVER MILESTONES
         elif not msg and not is_match_over:
             is_t20 = "T20" in match_name.upper()
             milestones = [6, 10, 15, 20] if is_t20 else [10, 20, 30, 40, 50, 60, 70, 80, 90]
@@ -443,7 +457,8 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        if not msg and not is_match_over:
+        # E. PLAYER MILESTONES (With "New Match" Safety Shield)
+        if not msg and not is_match_over and not is_new_match:
             event_type = None
             speed_alert = ""
             
@@ -468,6 +483,7 @@ def fetch_match_update(match_url, match_name):
                     msg = f"{header}\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *What a knock! Share the news!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
+        # F. SEND MESSAGE
         if msg: 
             send_telegram(msg, pro_edit=True, team_batting=team_batting)
         
@@ -478,11 +494,11 @@ def fetch_match_update(match_url, match_name):
             
         conn.commit()
     except Exception as e:
-        pass
+        print("Scrape Error:", e)
 
 if __name__ == "__main__":
     print("🚀 WhatsApp Content Assistant & Narrative AI Engine Starting...")
-    send_telegram("✅ *Content Assistant Online!*\n- Bulletproof Scraper Active 🛡️\n- IST Timezone 8 AM Briefing Active ⏰\n- AI Editor Active ✨")
+    send_telegram("✅ *Content Assistant Online!*\n- SPAM SHIELD Active 🛡️\n- Duplicate Blocks Fixed 🔒\n- Token Sinks Plugged ⚡")
     
     while True:
         try:
