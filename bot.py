@@ -33,7 +33,7 @@ cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, last_wickets INTEGER, toss_done INTEGER DEFAULT 0)")
 cursor.execute("CREATE TABLE IF NOT EXISTS daily_logs (date TEXT PRIMARY KEY)")
-cursor.execute("CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)")
+cursor.execute("CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)") # Default is 1 (Auto-Track)
 
 try:
     cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
@@ -202,7 +202,7 @@ def handle_commands():
             if "/tracklist" in text:
                 matches = scrape_match_links()
                 if not matches:
-                    send_telegram("📭 No international matches found to track.")
+                    send_telegram("📭 No matches found.")
                 else:
                     report = "📋 *TRACKING MANAGER*\n—————————————————\n"
                     for i, (name, link) in enumerate(matches):
@@ -221,7 +221,7 @@ def handle_commands():
                     cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 1)", (m_id, name))
                     conn.commit()
                     send_telegram(f"✅ Now tracking: *{name}*")
-                except: send_telegram("⚠️ Invalid ID. Use `/tracklist` to see IDs.")
+                except: send_telegram("⚠️ Invalid ID.")
 
             elif "/stop" in text:
                 try:
@@ -232,10 +232,10 @@ def handle_commands():
                     cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, name))
                     conn.commit()
                     send_telegram(f"❌ Muted: *{name}*")
-                except: send_telegram("⚠️ Invalid ID. Use `/tracklist` to see IDs.")
+                except: send_telegram("⚠️ Invalid ID.")
 
             elif "/score" in text:
-                send_telegram("🏏 *Fetching live & completed matches...*")
+                send_telegram("🏏 *Fetching live matches...*")
                 matches = scrape_match_links()
                 if not matches:
                     send_telegram("⚠️ There are no international matches on the board right now.")
@@ -244,12 +244,12 @@ def handle_commands():
                     for name, link in matches[:5]:
                         score = scrape_instant_score(link)
                         summary_data.append(f"🔹 *{name}*\n{score}")
-                    send_telegram("🏆 *LIVE & RECENT INTERNATIONALS* 🏆\n—————————————————\n" + "\n\n".join(summary_data))
+                    send_telegram("🏆 *LIVE INTERNATIONALS* 🏆\n—————————————————\n" + "\n\n".join(summary_data))
     except Exception as e:
         print("Command Error:", e)
 
 # =====================
-# SCRAPING ENGINE (BULLETPROOF)
+# SCRAPING ENGINE 
 # =====================
 def scrape_match_links():
     try:
@@ -270,7 +270,6 @@ def scrape_match_links():
                         matches.append((name, full_link))
         return matches
     except Exception as e: 
-        print("Scrape links error:", e)
         return []
 
 def scrape_instant_score(match_url):
@@ -372,7 +371,7 @@ def fetch_match_update(match_url, match_name):
 
         m_id = match_url.split("/")[-2] if "/" in match_url else str(hash(match_name))
         
-        # FIX 1: Detect if this is a newly fetched old match to prevent startup spam
+        # Detect if this is a newly fetched match
         is_new_match = False
         try:
             row = cursor.execute("SELECT last_over, last_wickets, toss_done, last_wicket_over FROM state WHERE m_id=?", (m_id,)).fetchone()
@@ -396,15 +395,17 @@ def fetch_match_update(match_url, match_name):
         is_innings_break = (wickets == 10 and not is_match_over) or any(phrase in status_lower for phrase in ["innings break", "target", "stumps", "lunch", "tea"])
         
         # ---------------------------------------------------------------------------------
-        # ANTI-SPAM SHIELD: If it's an old/finished match we just found, SILENTLY save it.
+        # ANTI-SPAM SHIELD: Silently save and MUTE matches that are already over on startup.
         # ---------------------------------------------------------------------------------
         if is_new_match and is_match_over:
             cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_MATCH_END",))
-            cursor.execute("INSERT OR IGNORE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)", (m_id, cur_overs, wickets, toss_done, last_wk_ov))
+            cursor.execute("INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)", (m_id, cur_overs, wickets, toss_done, last_wk_ov))
+            # Permanently Mute this match
+            cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
             conn.commit()
-            return # Exit completely to avoid ANY spam
+            return # Exit to avoid spam
 
-        # A. EARLY COLLAPSE & DOUBLE STRIKE (Protected against restart spam)
+        # A. EARLY COLLAPSE & DOUBLE STRIKE
         if wickets > last_wk and not is_new_match:
             new_wk_ov = cur_overs
             if wickets == 3 and cur_overs <= 6.0 and last_wk < 3:
@@ -419,12 +420,15 @@ def fetch_match_update(match_url, match_name):
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
             last_wk_ov = new_wk_ov 
 
-        # B. MATCH END (Fixed ID to strictly prevent looping spam)
+        # B. MATCH END & AUTO-KILL
         if not msg and is_match_over:
             eid = f"{m_id}_MATCH_END"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n📊 *FINAL TALLY:*\n🔹 {match_name}\n🔹 Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Follow us for more cricket updates!*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+                
+                # THE KILL SWITCH: Auto-mute the match so it never scans it again tomorrow
+                cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
 
         # C. INNINGS BREAK
         elif not msg and is_innings_break:
@@ -457,7 +461,7 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # E. PLAYER MILESTONES (With "New Match" Safety Shield)
+        # E. PLAYER MILESTONES
         if not msg and not is_match_over and not is_new_match:
             event_type = None
             speed_alert = ""
@@ -494,11 +498,11 @@ def fetch_match_update(match_url, match_name):
             
         conn.commit()
     except Exception as e:
-        print("Scrape Error:", e)
+        pass
 
 if __name__ == "__main__":
     print("🚀 WhatsApp Content Assistant & Narrative AI Engine Starting...")
-    send_telegram("✅ *Content Assistant Online!*\n- SPAM SHIELD Active 🛡️\n- Duplicate Blocks Fixed 🔒\n- Token Sinks Plugged ⚡")
+    send_telegram("✅ *Auto-Track Active!* 🏏\n- Bot will automatically track new matches.\n- Bot will auto-kill matches when they finish.")
     
     while True:
         try:
@@ -509,8 +513,12 @@ if __name__ == "__main__":
             for name, link in matches:
                 m_id = link.split("/")[-2]
                 
+                # AUTO-TRACK LOGIC: If it's not in the DB yet, default to 1 (Track).
+                # If it IS in the DB, respect whatever value is there (0 if it was auto-killed).
                 row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
-                if row and row[0] == 0:
+                is_tracking = row[0] if row else 1
+                
+                if is_tracking == 0:
                     continue 
                 
                 fetch_toss_update(link, name)
