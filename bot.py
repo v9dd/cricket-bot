@@ -31,36 +31,29 @@ cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_ov
 cursor.execute("CREATE TABLE IF NOT EXISTS daily_logs (date TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)")
 
-# Upgrade state table for Double Strike tracking if needed
 try:
     cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
 except:
-    pass # Column already exists
+    pass 
 conn.commit()
 
 match_state = {}
 last_update_id = None
 
+# =====================
+# AI ENGINE
+# =====================
 def get_pro_edit(text: str, team_batting: str = None) -> str | None:
-    """
-    Generates a professional cricket news flash using Groq API.
-    Returns formatted headline + 2 punchy paragraphs, or None on failure.
-    """
-
     if not GROQ_API_KEY or not text:
         return None
 
     url = "https://api.groq.com/openai/v1/chat/completions"
-
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # Limit input to avoid token overflow but preserve meaning
     clean_data = text.strip()[:400]
-
-    # Context hint to improve narrative accuracy
     context_hint = ""
     if team_batting:
         context_hint = (
@@ -69,11 +62,8 @@ def get_pro_edit(text: str, team_batting: str = None) -> str | None:
             f"If scoring freely, frame it as dominance."
         )
 
-    prompt = f"""
-You are a professional cricket news editor.
-
-TASK:
-Convert the provided match update into a breaking news flash.
+    prompt = f"""You are a professional cricket news editor.
+TASK: Convert the provided match update into a breaking news flash.
 
 OUTPUT FORMAT STRICTLY:
 • One catchy headline with emojis
@@ -88,17 +78,13 @@ STYLE:
 • No bullet points, no lists
 
 EXAMPLE OUTPUT:
-
 🏏 COLLAPSE! – AUS vs IND 🏏
 Australia’s batting unit has imploded under relentless pressure, crashing to 78/5 inside 14 overs.
 
 India now smells blood, with momentum fully in their control as the match swings decisively.
 
 {context_hint}
-
-MATCH DATA:
-{clean_data}
-"""
+MATCH DATA: {clean_data}"""
 
     data = {
         "model": "llama-3.3-70b-versatile",
@@ -114,22 +100,12 @@ MATCH DATA:
     try:
         res = requests.post(url, headers=headers, json=data, timeout=15)
         res.raise_for_status()
-
         output = res.json()["choices"][0]["message"]["content"].strip()
-
-        # Extra safety cleanup
-        output = output.replace("\n\n\n", "\n\n")
-
-        return output
-
-    except requests.exceptions.RequestException as e:
+        return output.replace("\n\n\n", "\n\n")
+    except Exception as e:
         print(f"Groq API error: {e}")
         return None
 
-    except (KeyError, IndexError, ValueError):
-        print("Unexpected response format from Groq API")
-        return None
-        
 # =====================
 # CORE UTILITIES
 # =====================
@@ -137,12 +113,10 @@ def send_telegram(text, pro_edit=False, team_batting=None):
     if not text: return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     
-    # Send Original Raw Template
     try:
         requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": "true"}, timeout=10)
     except: pass
 
-    # AI Pro Edit
     if pro_edit and GROQ_API_KEY:
         ai_text = get_pro_edit(text, team_batting)
         if ai_text:
@@ -160,8 +134,46 @@ def is_international_text_check(text):
     intl_formats = ["TEST", "ODI", "T20I", "WORLD CUP"]
     if any(fmt in title for fmt in intl_formats): return True
     countries = ["INDIA", "AUSTRALIA", "ENGLAND", "NEW ZEALAND", "SOUTH AFRICA", "PAKISTAN", "SRI LANKA", "WEST INDIES", "BANGLADESH", "ZIMBABWE", "AFGHANISTAN", "IRELAND"]
-    if sum(1 for c in countries if c in title) >= 2: return True
-    return False
+    return sum(1 for c in countries if c in title) >= 2
+
+# =====================
+# DAILY BRIEFING FEATURE
+# =====================
+def scrape_todays_schedule():
+    try:
+        response = requests.get("https://www.cricbuzz.com/cricket-schedule", headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(response.text, "html.parser")
+        today_str = datetime.now().strftime("%a %b %d").upper()
+        todays_matches = []
+        
+        for block in soup.find_all("div", class_="cb-col-100 cb-col cb-schdl"):
+            date_header = block.find("div", class_="cb-col-100 cb-col cb-lv-grn-strip")
+            if not date_header or today_str not in date_header.get_text().upper(): continue
+            match_list = block.find_next_sibling("div")
+            if not match_list: continue
+            
+            for match in match_list.find_all("div", class_="cb-ovr-flo"):
+                match_info = match.get_text(strip=True)
+                if is_international_text_check(match_info):
+                    todays_matches.append(f"• {match_info}")
+        
+        if not todays_matches: return "No international matches scheduled for today."
+        header = f"📅 *TODAY'S INTERNATIONAL SCHEDULE*\n—————————————————\n_{datetime.now().strftime('%d %B %Y')}_\n\n"
+        footer = f"\n\n🖼 [Tap for Series Graphics]({get_img_link('Cricket Schedule')})\n—————————————————\n🔔 *Keep notifications ON for live updates!*"
+        return header + "\n".join(todays_matches) + footer
+    except: return None
+
+def handle_daily_briefing():
+    now = datetime.now()
+    today_date = now.strftime("%Y-%m-%d")
+    if now.hour == 8:
+        row = cursor.execute("SELECT date FROM daily_logs WHERE date=?", (today_date,)).fetchone()
+        if not row:
+            brief = scrape_todays_schedule()
+            if brief:
+                send_telegram(brief)
+                cursor.execute("INSERT INTO daily_logs (date) VALUES (?)", (today_date,))
+                conn.commit()
 
 # =====================
 # TRACKING MANAGER & COMMANDS
@@ -171,9 +183,11 @@ def handle_commands():
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     params = {"timeout": 5}
     if last_update_id: params["offset"] = last_update_id + 1
+    
     try:
         res = requests.get(url, params=params, timeout=10).json()
         if not res.get("ok"): return
+        
         for update in res.get("result", []):
             last_update_id = update["update_id"]
             msg_data = update.get("message") or update.get("channel_post")
@@ -184,14 +198,14 @@ def handle_commands():
                 matches = scrape_match_links()
                 if not matches:
                     send_telegram("📭 No international matches found to track.")
-                    continue
-                report = "📋 *TRACKING MANAGER*\n—————————————————\n"
-                for i, (name, link) in enumerate(matches):
-                    m_id = link.split("/")[-2]
-                    row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
-                    status = "✅ Tracking" if (not row or row[0] == 1) else "❌ Muted"
-                    report += f"*{i+1}.* {name}\nStatus: {status}\nToggle: `/track {i+1}` or `/stop {i+1}`\n\n"
-                send_telegram(report)
+                else:
+                    report = "📋 *TRACKING MANAGER*\n—————————————————\n"
+                    for i, (name, link) in enumerate(matches):
+                        m_id = link.split("/")[-2]
+                        row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
+                        status = "✅ Tracking" if (not row or row[0] == 1) else "❌ Muted"
+                        report += f"*{i+1}.* {name}\nStatus: {status}\nToggle: `/track {i+1}` or `/stop {i+1}`\n\n"
+                    send_telegram(report)
 
             elif "/track" in text:
                 try:
@@ -215,10 +229,22 @@ def handle_commands():
                     send_telegram(f"❌ Muted: *{name}*")
                 except: send_telegram("⚠️ Invalid ID. Use `/tracklist` to see IDs.")
 
-    except: pass
+            elif "/score" in text:
+                send_telegram("🏏 *Fetching live & completed matches...*")
+                matches = scrape_match_links()
+                if not matches:
+                    send_telegram("⚠️ There are no international matches on the board right now.")
+                else:
+                    summary_data = []
+                    for name, link in matches[:5]:
+                        score = scrape_instant_score(link)
+                        summary_data.append(f"🔹 *{name}*\n{score}")
+                    send_telegram("🏆 *LIVE & RECENT INTERNATIONALS* 🏆\n—————————————————\n" + "\n\n".join(summary_data))
+    except Exception as e:
+        print("Command Error:", e)
 
 # =====================
-# SCRAPING ENGINE & CORE LOGIC
+# SCRAPING ENGINE
 # =====================
 def scrape_match_links():
     try:
@@ -227,6 +253,7 @@ def scrape_match_links():
         main = soup.find("div", class_="flex flex-col gap-2")
         matches = []
         if not main: return matches
+        
         for block in main.find_all("div", recursive=False):
             block_text = block.get_text(separator=" ", strip=True).upper()
             if not block_text.startswith("INTERNATIONAL") and not block_text.startswith("ICC"): continue
@@ -287,7 +314,6 @@ def fetch_match_update(match_url, match_name):
         score_div = soup.find("div", class_=lambda x: x and "text-3xl" in x and "font-bold" in x)
         if not score_div: return
         
-        # 1. FIX: Extract Batting Team directly from Score String (e.g. "IND 57 - 5")
         full_score_text = score_div.get_text(separator=" ", strip=True) 
         team_match = re.search(r'^([A-Za-z]+)', full_score_text)
         team_batting = team_match.group(1) if team_match else ""
@@ -310,20 +336,16 @@ def fetch_match_update(match_url, match_name):
         cur_overs = float(overs_raw) if overs_raw.replace('.', '', 1).isdigit() else 0.0
         score_display = f"{team_batting} {runs}/{wickets}" if team_batting else f"{runs}/{wickets}"
 
-        # 2. FIX: Separate Official Match Status from Ball-by-Ball Commentary
         status_text = ""
-        # Look for standard Cricbuzz status classes (expanded to catch abandoned/complete)
         status_div = soup.find("div", class_=lambda x: x and any(c in x for c in ["text-cb-danger", "text-cb-info", "text-cb-success", "cb-text-complete", "cb-text-abandon"]))
         if status_div:
             status_text = status_div.get_text(strip=True)
 
-        # Fallback if standard classes fail (searches for key phrases in nearby short tags)
         if not status_text:
             alt_status = soup.find(lambda tag: tag.name == "div" and tag.get("class") and any(phrase in tag.get_text(strip=True).lower() for phrase in ["won by", "abandoned", "target ", "innings break", "stumps", "no result"]))
             if alt_status and len(alt_status.get_text(strip=True)) < 100:
                  status_text = alt_status.get_text(strip=True)
 
-        # Fetch ball by ball commentary
         commentary_text = ""
         cm = soup.find("div", class_=lambda x: x and "leading-6" in x)
         if cm:
@@ -349,7 +371,6 @@ def fetch_match_update(match_url, match_name):
             last_ov, last_wk, toss_done = row if row else (0.0, 0, 0)
             last_wk_ov = -10.0
         
-        # Reset logic for 2nd Innings
         if cur_overs < last_ov - 5: 
             last_ov = 0.0
             last_wk = 0
@@ -357,11 +378,9 @@ def fetch_match_update(match_url, match_name):
             
         msg = None
         
-        # 3. FIX: Strict rules for Match End and Innings Breaks using ONLY status_lower
         is_match_over = any(phrase in status_lower for phrase in ["won by", "win by", "drawn", "tied", "abandoned", "no result"])
         is_innings_break = (wickets == 10 and not is_match_over) or any(phrase in status_lower for phrase in ["innings break", "target", "stumps", "lunch", "tea"])
         
-        # A. EARLY COLLAPSE & DOUBLE STRIKE (Uses general event_text)
         if wickets > last_wk:
             new_wk_ov = cur_overs
             if wickets == 3 and cur_overs <= 6.0:
@@ -376,21 +395,18 @@ def fetch_match_update(match_url, match_name):
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
             last_wk_ov = new_wk_ov 
 
-        # B. MATCH END
         if not msg and is_match_over:
             eid = f"{m_id}_MATCH_END_{status_text[:10]}"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n📊 *FINAL TALLY:*\n🔹 {match_name}\n🔹 Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Follow us for more cricket updates!*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # C. INNINGS BREAK
         elif not msg and is_innings_break:
             eid = f"{m_id}_INNINGS_BREAK_{runs}" 
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🛑 *INNINGS COMPLETED* 🛑\n—————————————————\n🏏 *{match_name}* finishes their innings.\n\n📊 *FINAL SCORE:* *{score_display}*\n🎯 *UPDATE:* _{status_text}_\n\n🖼 [Tap for Match Gallery]({get_img_link(match_name)})\n—————————————————\n🕒 _Second innings starts shortly. Who's winning this?_"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # D. SMART OVER MILESTONES
         elif not msg and not is_match_over:
             is_t20 = "T20" in match_name.upper()
             milestones = [6, 10, 15, 20] if is_t20 else [10, 20, 30, 40, 50, 60, 70, 80, 90]
@@ -414,7 +430,6 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # E. PLAYER MILESTONES
         if not msg and not is_match_over:
             event_type = None
             speed_alert = ""
@@ -440,7 +455,6 @@ def fetch_match_update(match_url, match_name):
                     msg = f"{header}\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *What a knock! Share the news!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # F. SEND MESSAGE
         if msg: 
             send_telegram(msg, pro_edit=True, team_batting=team_batting)
         
@@ -455,12 +469,12 @@ def fetch_match_update(match_url, match_name):
 
 if __name__ == "__main__":
     print("🚀 WhatsApp Content Assistant & Narrative AI Engine Starting...")
-    send_telegram("✅ *Content Assistant Online!*\n- Rapid Fire Tracking Active ⚡\n- Double Strike Alerts Active 🔥\n- AI Editor (Perfect Length) Active")
+    send_telegram("✅ *Content Assistant Online!*\n- Commands Fixed (/score, /tracklist)\n- 8 AM Briefing Restored\n- AI Editor Active")
     
     while True:
         try:
             handle_commands()
-            # handle_daily_briefing() # Temporarily commented out if not in use
+            handle_daily_briefing() # <--- Un-commented and active!
             
             matches = scrape_match_links()
             for name, link in matches:
