@@ -33,7 +33,7 @@ cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, last_wickets INTEGER, toss_done INTEGER DEFAULT 0)")
 cursor.execute("CREATE TABLE IF NOT EXISTS daily_logs (date TEXT PRIMARY KEY)")
-cursor.execute("CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)") # Default is 1 (Auto-Track)
+cursor.execute("CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)")
 
 try:
     cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
@@ -45,7 +45,7 @@ match_state = {}
 last_update_id = None
 
 # =====================
-# AI ENGINE
+# AI ENGINE (PERFECT LENGTH & SPACING)
 # =====================
 def get_pro_edit(text: str, team_batting: str = None) -> str | None:
     if not GROQ_API_KEY or not text:
@@ -60,33 +60,30 @@ def get_pro_edit(text: str, team_batting: str = None) -> str | None:
     clean_data = text.strip()[:400]
     context_hint = ""
     if team_batting:
-        context_hint = (
-            f"\nTEAM CONTEXT: {team_batting} is batting. "
-            f"If wickets fall, frame it as pressure. "
-            f"If scoring freely, frame it as dominance."
-        )
+        context_hint = f"\nTEAM CONTEXT: {team_batting} is currently batting."
 
-    prompt = f"""You are a professional cricket news editor.
-TASK: Convert the provided match update into a breaking news flash.
+    prompt = f"""You are a professional Cricket News Editor for a WhatsApp channel.
+Rewrite the raw match data into a CRISP NARRATIVE post.
 
-OUTPUT FORMAT STRICTLY:
-• One catchy headline with emojis
-• Exactly 2 short paragraphs
-• Total 3–4 sentences maximum
-• Double newline between paragraphs
+YOUR OUTPUT MUST MIRROR THE TONE OF THESE EXAMPLES.
 
-STYLE:
-• Dramatic, authoritative, fast-paced
-• Professional sports journalism tone
-• Natural integration of score, overs, wickets, and match situation
-• No bullet points, no lists
-• Do not invent "upsets" unless specifically stated in the data.
+EXAMPLE 1 (Toss):
+🏏 TOSS UPDATE – ENG vs SL 🏏 
+Sri Lanka have won the toss and elected to bowl first in their Super 8 opener at the Pallekele International Cricket Stadium.
 
-EXAMPLE OUTPUT:
-🏏 COLLAPSE! – AUS vs IND 🏏
-Australia’s batting unit has imploded under relentless pressure, crashing to 78/5 inside 14 overs.
+A massive game in Group 2 to kick off the business end. The Lankan Lions will look to exploit the early moisture on a surface that promises plenty of turn. Game on!
 
-India now smells blood, with momentum fully in their control as the match swings decisively.
+EXAMPLE 2 (Match Update):
+🏏 10 OVER UPDATE – ENG vs SL 🏏 
+England find themselves in a tough spot, reaching 68/4 after 10 overs in their Super 8 opener.
+
+Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark. The middle order needs to stabilize quickly or risk a complete collapse.
+
+RULES:
+1. Exactly 1 Heading and 2 narrative paragraphs.
+2. IMPORTANT: Use a double newline (\n\n) to create a clear blank space between the two paragraphs.
+3. Length: 3-4 sentences total.
+4. No bullet points or labels. Weave stats into natural sentences.
 
 {context_hint}
 MATCH DATA: {clean_data}"""
@@ -98,7 +95,7 @@ MATCH DATA: {clean_data}"""
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.5,
-        "max_tokens": 180,
+        "max_tokens": 200,
         "top_p": 0.9
     }
 
@@ -202,7 +199,7 @@ def handle_commands():
             if "/tracklist" in text:
                 matches = scrape_match_links()
                 if not matches:
-                    send_telegram("📭 No matches found.")
+                    send_telegram("📭 No international matches found to track.")
                 else:
                     report = "📋 *TRACKING MANAGER*\n—————————————————\n"
                     for i, (name, link) in enumerate(matches):
@@ -371,7 +368,6 @@ def fetch_match_update(match_url, match_name):
 
         m_id = match_url.split("/")[-2] if "/" in match_url else str(hash(match_name))
         
-        # Detect if this is a newly fetched match
         is_new_match = False
         try:
             row = cursor.execute("SELECT last_over, last_wickets, toss_done, last_wicket_over FROM state WHERE m_id=?", (m_id,)).fetchone()
@@ -389,24 +385,34 @@ def fetch_match_update(match_url, match_name):
             last_wk = 0
             last_wk_ov = -10.0
             
-        msg = None
-        
         is_match_over = any(phrase in status_lower for phrase in ["won by", "win by", "drawn", "tied", "abandoned", "no result"])
         is_innings_break = (wickets == 10 and not is_match_over) or any(phrase in status_lower for phrase in ["innings break", "target", "stumps", "lunch", "tea"])
-        
-        # ---------------------------------------------------------------------------------
-        # ANTI-SPAM SHIELD: Silently save and MUTE matches that are already over on startup.
-        # ---------------------------------------------------------------------------------
-        if is_new_match and is_match_over:
-            cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_MATCH_END",))
-            cursor.execute("INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)", (m_id, cur_overs, wickets, toss_done, last_wk_ov))
-            # Permanently Mute this match
-            cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
-            conn.commit()
-            return # Exit to avoid spam
 
-        # A. EARLY COLLAPSE & DOUBLE STRIKE
-        if wickets > last_wk and not is_new_match:
+        # =======================================================================================
+        # 🛡️ THE SILENT STARTUP SHIELD: Neutralizes old matches on startup to prevent spam.
+        # =======================================================================================
+        if is_new_match:
+            try:
+                cursor.execute("INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)", (m_id, cur_overs, wickets, toss_done, cur_overs))
+            except:
+                pass
+                
+            if is_match_over:
+                cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_MATCH_END",))
+                cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name)) # Auto-Mute
+
+            if is_innings_break:
+                cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_INNINGS_BREAK_{runs}",))
+                
+            if wickets >= 3:
+                cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_COLLAPSE_3WK",))
+
+            conn.commit()
+            return # EXIT COMPLETELY. Do not send any messages for a match we just found.
+
+        msg = None
+
+        if wickets > last_wk:
             new_wk_ov = cur_overs
             if wickets == 3 and cur_overs <= 6.0 and last_wk < 3:
                 eid = f"{m_id}_COLLAPSE_3WK"
@@ -420,24 +426,21 @@ def fetch_match_update(match_url, match_name):
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
             last_wk_ov = new_wk_ov 
 
-        # B. MATCH END & AUTO-KILL
         if not msg and is_match_over:
             eid = f"{m_id}_MATCH_END"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n📊 *FINAL TALLY:*\n🔹 {match_name}\n🔹 Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Follow us for more cricket updates!*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
                 
-                # THE KILL SWITCH: Auto-mute the match so it never scans it again tomorrow
+                # AUTO-KILL: Mute the match so it never scans it again tomorrow
                 cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
 
-        # C. INNINGS BREAK
         elif not msg and is_innings_break:
             eid = f"{m_id}_INNINGS_BREAK_{runs}" 
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 msg = f"🛑 *INNINGS COMPLETED* 🛑\n—————————————————\n🏏 *{match_name}* finishes their innings.\n\n📊 *FINAL SCORE:* *{score_display}*\n🎯 *UPDATE:* _{status_text}_\n\n🖼 [Tap for Match Gallery]({get_img_link(match_name)})\n—————————————————\n🕒 _Second innings starts shortly. Who's winning this?_"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # D. SMART OVER MILESTONES
         elif not msg and not is_match_over:
             is_t20 = "T20" in match_name.upper()
             milestones = [6, 10, 15, 20] if is_t20 else [10, 20, 30, 40, 50, 60, 70, 80, 90]
@@ -461,8 +464,7 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # E. PLAYER MILESTONES
-        if not msg and not is_match_over and not is_new_match:
+        if not msg and not is_match_over:
             event_type = None
             speed_alert = ""
             
@@ -487,7 +489,6 @@ def fetch_match_update(match_url, match_name):
                     msg = f"{header}\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *What a knock! Share the news!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # F. SEND MESSAGE
         if msg: 
             send_telegram(msg, pro_edit=True, team_batting=team_batting)
         
@@ -502,7 +503,7 @@ def fetch_match_update(match_url, match_name):
 
 if __name__ == "__main__":
     print("🚀 WhatsApp Content Assistant & Narrative AI Engine Starting...")
-    send_telegram("✅ *Auto-Track Active!* 🏏\n- Bot will automatically track new matches.\n- Bot will auto-kill matches when they finish.")
+    send_telegram("✅ *Auto-Track Active!* 🏏\n- Startup Spam Shield Active 🛡️\n- Auto-Kill for finished matches is Active.")
     
     while True:
         try:
@@ -513,8 +514,7 @@ if __name__ == "__main__":
             for name, link in matches:
                 m_id = link.split("/")[-2]
                 
-                # AUTO-TRACK LOGIC: If it's not in the DB yet, default to 1 (Track).
-                # If it IS in the DB, respect whatever value is there (0 if it was auto-killed).
+                # Check DB for tracking config. Defaults to 1 (Auto-Track new matches).
                 row = cursor.execute("SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)).fetchone()
                 is_tracking = row[0] if row else 1
                 
