@@ -105,7 +105,7 @@ MATCH DATA: {clean_data}"""
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.5,
-        "max_tokens": 160,
+        "max_tokens": 150,
         "top_p": 0.9,
     }
 
@@ -127,7 +127,7 @@ def send_telegram(text, pro_edit=False, team_batting=None):
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    # Try AI First
+    # AI VERSION FIRST (Clean text, no "Copy This" label)
     if pro_edit and GROQ_API_KEY:
         ai_text = get_pro_edit(text, team_batting)
         if ai_text:
@@ -146,7 +146,7 @@ def send_telegram(text, pro_edit=False, team_batting=None):
             except requests.RequestException as exc:
                 logger.warning("send_telegram (pro edit) failed: %s", exc)
 
-    # Fallback to Raw Text
+    # FALLBACK TO RAW TEXT
     try:
         requests.post(
             url,
@@ -181,7 +181,7 @@ def stable_event_suffix(text):
 
 def is_international_text_check(text):
     title = text.upper()
-    if any(x in title for x in [" U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A", "ENGLAND LIONS", "HONG KONG", "CHINA", "OMAN", "NEPAL", "KUWAIT", "MALAYSIA"]):
+    if any(x in title for x in [" U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A", "ENGLAND LIONS", "HONG KONG", "CHINA", "NEPAL", "OMAN"]):
         return False
     
     countries = [
@@ -454,7 +454,6 @@ def fetch_match_update(match_url, match_name):
 
         # 1. HUNT FOR MATCH STATUS FIRST (Fixes the missing "Match End" bug)
         status_text = ""
-        # Check standard status div
         status_div = soup.find(
             "div",
             class_=lambda x: x
@@ -472,7 +471,6 @@ def fetch_match_update(match_url, match_name):
         if status_div:
             status_text = status_div.get_text(strip=True)
 
-        # Fallback check for match status
         if not status_text:
             alt_status = soup.find(
                 lambda tag: tag.name == "div"
@@ -495,7 +493,7 @@ def fetch_match_update(match_url, match_name):
         status_lower = status_text.lower()
         is_match_over = is_result_text(status_lower)
 
-        # 2. MATCH END LOGIC (Fires even if scoreboard is gone)
+        # 2. MATCH END LOGIC
         if is_match_over:
             eid = f"{m_id}_MATCH_END"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
@@ -504,33 +502,63 @@ def fetch_match_update(match_url, match_name):
                 cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
                 conn.commit()
                 send_telegram(msg, pro_edit=True)
-            return # Exit since the match is over
+            return
 
-        # 3. SCOREBOARD LOGIC (Proceeds only if match is active)
+        # 3. SCOREBOARD LOGIC
         score_div = soup.find(
             "div",
             class_=lambda x: x and (("text-3xl" in x and "font-bold" in x) or "cb-font-20" in x),
         )
         if not score_div:
-            return # If no score and match isn't over, just wait.
+            return
 
-        # --- TEAM AWARE DETECTION ---
+        # --- SMART BATTING TEAM DETECTOR ---
         full_score_text = score_div.get_text(separator=" ", strip=True)
-        batting_abbrev_match = re.search(r'([A-Z]+)\s+\d+/', full_score_text)
-        batting_abbrev = batting_abbrev_match.group(1) if batting_abbrev_match else ""
-        
         team_batting = ""
-        teams_in_match = re.split(r'\s+vs\s+|\s+Vs\s+|\s+VS\s+', match_name)
+        abbrev_match = re.search(r'^([A-Za-z]+)', full_score_text)
         
-        if batting_abbrev:
-            for team in teams_in_match:
-                if all(char in team.upper() for char in batting_abbrev):
-                    team_batting = team.strip()
+        if abbrev_match:
+            abbrev = abbrev_match.group(1).upper()
+            teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
+            
+            # Dictionary for common abbreviations
+            overrides = {
+                "RSA": "South Africa", "SA": "South Africa",
+                "IND": "India", "AUS": "Australia", 
+                "ENG": "England", "NZ": "New Zealand",
+                "PAK": "Pakistan", "SL": "Sri Lanka", "SRI": "Sri Lanka",
+                "WI": "West Indies", "BAN": "Bangladesh", "ZIM": "Zimbabwe",
+                "AFG": "Afghanistan", "IRE": "Ireland", "SCO": "Scotland", "USA": "USA"
+            }
+            
+            # Map abbreviation safely to team name
+            if abbrev in overrides:
+                mapped = overrides[abbrev]
+                for t in teams_in_match:
+                    if mapped.lower() in t.lower():
+                        team_batting = t
+                        break
+            
+            # Dynamic mapping fallback
+            if not team_batting:
+                for t in teams_in_match:
+                    words = t.split()
+                    if len(words) > 1:
+                        initials = "".join([w[0].upper() for w in words])
+                        if abbrev == initials or abbrev.endswith(initials):
+                            team_batting = t
+                            break
+                    if t.upper().startswith(abbrev):
+                        team_batting = t
+                        break
+
+        # Status text fallback if abbreviations fail (e.g. "South Africa need 50 runs")
+        if not team_batting and status_text:
+            teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
+            for t in teams_in_match:
+                if f"{t.lower()} need" in status_lower or f"{t.lower()} require" in status_lower or f"{t.lower()} trail" in status_lower:
+                    team_batting = t
                     break
-        
-        if not team_batting:
-            team_match = re.search(r"^([A-Za-z]+)", full_score_text)
-            team_batting = team_match.group(1) if team_match else ""
 
         p = score_div.find_all("div")
         if not p:
@@ -589,7 +617,7 @@ def fetch_match_update(match_url, match_name):
             last_wk = 0
             last_wk_ov = -10.0
 
-        is_innings_break = (wickets == 10) or any(
+        is_innings_break = (wickets == 10 and not is_match_over) or any(
             phrase in status_lower
             for phrase in ["innings break", "target", "stumps", "lunch", "tea"]
         )
