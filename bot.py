@@ -155,7 +155,7 @@ def send_telegram(raw_text, pro_edit=False, match_facts=None):
                     url,
                     data={
                         "chat_id": CHAT_ID,
-                        "text": f"✨ *AI REWRITE:*\n\n{ai_text}", 
+                        "text": ai_text, 
                         "parse_mode": "Markdown",
                         "disable_web_page_preview": "true",
                     },
