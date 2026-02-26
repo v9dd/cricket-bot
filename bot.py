@@ -93,7 +93,7 @@ RULES:
 1. Exactly 1 Heading and 2 narrative paragraphs.
 2. IMPORTANT: Use a double newline (\n\n) to create a clear blank space between the two paragraphs.
 3. Length: 3-4 sentences total.
-4. No bullet points or labels. Weave stats into natural sentences.
+4. No bullet points or labels. Weave stats into natural 2 sentences.
 
 {context_hint}
 MATCH DATA: {clean_data}"""
@@ -105,7 +105,7 @@ MATCH DATA: {clean_data}"""
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.5,
-        "max_tokens": 200,
+        "max_tokens": 160,
         "top_p": 0.9,
     }
 
