@@ -149,7 +149,7 @@ def send_telegram(text, pro_edit=False, team_batting=None):
                     url,
                     data={
                         "chat_id": CHAT_ID,
-                        "text": f"✨ *PRO EDIT (COPY THIS):*\n\n{ai_text}",
+                        "text": ai_text,
                         "parse_mode": "Markdown",
                         "disable_web_page_preview": "true",
                     },
