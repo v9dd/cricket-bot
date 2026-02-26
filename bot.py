@@ -36,7 +36,7 @@ try:
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY)")
     cursor.execute(
-        "CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, last_wickets INTEGER, toss_done INTEGER DEFAULT 0)"
+        "CREATE TABLE IF NOT EXISTS state (m_id TEXT PRIMARY KEY, last_over REAL, last_wickets INTEGER, toss_done INTEGER DEFAULT 0, innings INTEGER DEFAULT 1)"
     )
     cursor.execute("CREATE TABLE IF NOT EXISTS daily_logs (date TEXT PRIMARY KEY)")
     cursor.execute(
@@ -45,8 +45,9 @@ try:
 
     try:
         cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
+        cursor.execute("ALTER TABLE state ADD COLUMN innings INTEGER DEFAULT 1")
     except sqlite3.OperationalError:
-        pass # Column already exists
+        pass # Columns already exist
     conn.commit()
 except Exception as e:
     logger.error(f"Database Initialization Error: {e}")
@@ -57,8 +58,8 @@ last_update_id = None
 # =====================
 # AI ENGINE
 # =====================
-def get_pro_edit(text, team_batting=None):
-    if not GROQ_API_KEY or not text:
+def get_pro_edit(match_facts):
+    if not GROQ_API_KEY or not match_facts:
         return None
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -67,15 +68,11 @@ def get_pro_edit(text, team_batting=None):
         "Content-Type": "application/json",
     }
 
-    clean_data = text.strip()[:400]
-    context_hint = (
-        f"\nTEAM CONTEXT: {team_batting} is currently batting. Be absolutely certain you use THIS team name when describing the batting action." if team_batting else ""
-    )
-
-    prompt = f"""You are a professional Cricket News Editor for a WhatsApp channel.
+    # Restoring the "Flavor" with examples while maintaining "Fact Integrity"
+    prompt = f"""You are a professional Cricket News Editor for a premium WhatsApp channel.
 Rewrite the raw match data into a CRISP NARRATIVE post.
 
-YOUR OUTPUT MUST MIRROR THE TONE OF THESE EXAMPLES.
+YOUR OUTPUT MUST MIRROR THE TONE AND STRUCTURE OF THESE EXAMPLES:
 
 EXAMPLE 1 (Toss):
 🏏 TOSS UPDATE – ENG vs SL 🏏
@@ -89,23 +86,30 @@ England find themselves in a tough spot, reaching 68/4 after 10 overs in their S
 
 Phil Salt (37*) is leading a lone fightback, but Sri Lanka's spinners have dominated, including the massive wicket of captain Harry Brook (14) right at the 10-over mark. The middle order needs to stabilize quickly or risk a complete collapse.
 
+---
+STRICT CURRENT FACTS TO USE:
+- Match: {match_facts.get('match_name', 'Unknown')}
+- Event: {match_facts.get('event_type', 'LIVE UPDATE')}
+- Batting Team: {match_facts.get('team_batting', 'Unknown')}
+- Score: {match_facts.get('score_display', 'Unknown')}
+- Official Status: {match_facts.get('status_text', '')}
+
 RULES:
 1. Exactly 1 Heading and 2 narrative paragraphs.
-2. IMPORTANT: Use a double newline (\n\n) to create a clear blank space between the two paragraphs.
-3. Length: 3-4 sentences total.
-4. No bullet points or labels. Weave stats into natural 2 sentences.
-
-{context_hint}
-MATCH DATA: {clean_data}"""
+2. IMPORTANT: Use a double newline (\n\n) between paragraphs.
+3. Total Length: 3-4 sentences.
+4. STRICT: If 'Event' is MATCH_END, the post must celebrate the winner from the 'Official Status'. 
+5. NEVER invent stats not provided in the 'STRICT CURRENT FACTS' above.
+"""
 
     data = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": "You are an elite cricket news editor."},
+            {"role": "system", "content": "You are an elite cricket news editor who mirror's the user's specific writing style examples perfectly."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.5,
-        "max_tokens": 150,
+        "temperature": 0.6, # Balanced: low enough for facts, high enough for good writing
+        "max_tokens": 145,
         "top_p": 0.9,
     }
 
@@ -121,45 +125,44 @@ MATCH DATA: {clean_data}"""
 # =====================
 # CORE UTILITIES
 # =====================
-def send_telegram(text, pro_edit=False, team_batting=None):
-    if not text or not BOT_TOKEN or not CHAT_ID:
+def send_telegram(raw_text, pro_edit=False, match_facts=None):
+    if not raw_text or not BOT_TOKEN or not CHAT_ID:
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    # AI VERSION FIRST (Clean text, no "Copy This" label)
-    if pro_edit and GROQ_API_KEY:
-        ai_text = get_pro_edit(text, team_batting)
-        if ai_text:
-            try:
-                requests.post(
-                    url,
-                    data={
-                        "chat_id": CHAT_ID,
-                        "text": ai_text,
-                        "parse_mode": "Markdown",
-                        "disable_web_page_preview": "true",
-                    },
-                    timeout=10,
-                )
-                return # Stop here if AI succeeds
-            except requests.RequestException as exc:
-                logger.warning("send_telegram (pro edit) failed: %s", exc)
-
-    # FALLBACK TO RAW TEXT
+    # 1. SEND RAW TEXT FIRST
     try:
         requests.post(
             url,
             data={
                 "chat_id": CHAT_ID,
-                "text": text,
+                "text": raw_text,
                 "parse_mode": "Markdown",
                 "disable_web_page_preview": "true",
             },
             timeout=10,
         )
     except requests.RequestException as exc:
-        logger.warning("send_telegram failed: %s", exc)
+        logger.warning("send_telegram raw failed: %s", exc)
+
+    # 2. SEND AI VERSION SECOND (Without "PRO EDIT" label)
+    if pro_edit and GROQ_API_KEY and match_facts:
+        ai_text = get_pro_edit(match_facts)
+        if ai_text:
+            try:
+                requests.post(
+                    url,
+                    data={
+                        "chat_id": CHAT_ID,
+                        "text": f"✨ *AI REWRITE:*\n\n{ai_text}", 
+                        "parse_mode": "Markdown",
+                        "disable_web_page_preview": "true",
+                    },
+                    timeout=10,
+                )
+            except requests.RequestException as exc:
+                logger.warning("send_telegram AI failed: %s", exc)
 
 def get_img_link(query):
     safe_query = urllib.parse.quote(f"{query} Cricket Match {get_ist_now().year}")
@@ -181,7 +184,7 @@ def stable_event_suffix(text):
 
 def is_international_text_check(text):
     title = text.upper()
-    if any(x in title for x in [" U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A", "ENGLAND LIONS", "HONG KONG", "CHINA", "NEPAL", "OMAN"]):
+    if any(x in title for x in [" U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A", "ENGLAND LIONS", "HONG KONG", "CHINA"]):
         return False
     
     countries = [
@@ -441,7 +444,10 @@ def fetch_toss_update(match_url, match_name):
         match_state[match_url]["toss_sent"] = True
 
         msg = f"🪙 *TOSS UPDATE* 🪙\n—————————————————\n🏆 *{match_name}*\n\n🏟 *{toss_text}*\n\n🖼 [Tap for Toss Photos]({get_img_link(match_name + ' Toss')})\n—————————————————\n🏏 _Match starting soon! Get ready!_"
-        send_telegram(msg, pro_edit=True)
+        
+        # Mock match facts just for the toss
+        mf = {"match_name": match_name, "event_type": "TOSS", "status_text": toss_text}
+        send_telegram(msg, pro_edit=True, match_facts=mf)
     except Exception as exc:
         logger.warning("fetch_toss_update failed: %s", exc)
 
@@ -449,138 +455,94 @@ def fetch_match_update(match_url, match_name):
     try:
         response = requests.get(match_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
-
         m_id = match_url.split("/")[-2] if "/" in match_url else stable_event_suffix(match_name)
 
-        # 1. HUNT FOR MATCH STATUS FIRST (Fixes the missing "Match End" bug)
+        # 1. GET STATUS TEXT FIRST (To catch Match End reliably)
         status_text = ""
-        status_div = soup.find(
-            "div",
-            class_=lambda x: x
-            and any(
-                c in x
-                for c in [
-                    "text-cb-danger",
-                    "text-cb-info",
-                    "text-cb-success",
-                    "cb-text-complete",
-                    "cb-text-abandon",
-                ]
-            ),
-        )
+        status_div = soup.find("div", class_=lambda x: x and any(c in x for c in ["text-cb-danger", "text-cb-info", "text-cb-success", "cb-text-complete", "cb-text-abandon"]))
         if status_div:
             status_text = status_div.get_text(strip=True)
 
         if not status_text:
-            alt_status = soup.find(
-                lambda tag: tag.name == "div"
-                and tag.get("class")
-                and any(
-                    phrase in tag.get_text(strip=True).lower()
-                    for phrase in [
-                        "won by",
-                        "abandoned",
-                        "target ",
-                        "innings break",
-                        "stumps",
-                        "no result",
-                    ]
-                )
-            )
+            alt_status = soup.find(lambda tag: tag.name == "div" and tag.get("class") and any(phrase in tag.get_text(strip=True).lower() for phrase in ["won by", "abandoned", "target ", "innings break", "stumps", "no result"]))
             if alt_status and len(alt_status.get_text(strip=True)) < 100:
                 status_text = alt_status.get_text(strip=True)
 
         status_lower = status_text.lower()
         is_match_over = is_result_text(status_lower)
 
-        # 2. MATCH END LOGIC
-        if is_match_over:
-            eid = f"{m_id}_MATCH_END"
-            if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
-                msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n🔹 {match_name}\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Coverage concluded.*"
-                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-                cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
-                conn.commit()
-                send_telegram(msg, pro_edit=True)
-            return
-
-        # 3. SCOREBOARD LOGIC
-        score_div = soup.find(
-            "div",
-            class_=lambda x: x and (("text-3xl" in x and "font-bold" in x) or "cb-font-20" in x),
-        )
-        if not score_div:
-            return
-
-        # --- SMART BATTING TEAM DETECTOR ---
-        full_score_text = score_div.get_text(separator=" ", strip=True)
-        team_batting = ""
-        abbrev_match = re.search(r'^([A-Za-z]+)', full_score_text)
+        # 2. EXTRACT SCORE & TEAM LOGIC
+        score_div = soup.find("div", class_=lambda x: x and (("text-3xl" in x and "font-bold" in x) or "cb-font-20" in x))
         
-        if abbrev_match:
-            abbrev = abbrev_match.group(1).upper()
-            teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
+        team_batting = ""
+        runs, wickets = 0, 0
+        overs_raw = ""
+        cur_overs, cur_balls = 0.0, 0
+        score_display = ""
+        full_score_text = ""
+
+        if score_div:
+            full_score_text = score_div.get_text(separator=" ", strip=True)
             
-            # Dictionary for common abbreviations
-            overrides = {
-                "RSA": "South Africa", "SA": "South Africa",
-                "IND": "India", "AUS": "Australia", 
-                "ENG": "England", "NZ": "New Zealand",
-                "PAK": "Pakistan", "SL": "Sri Lanka", "SRI": "Sri Lanka",
-                "WI": "West Indies", "BAN": "Bangladesh", "ZIM": "Zimbabwe",
-                "AFG": "Afghanistan", "IRE": "Ireland", "SCO": "Scotland", "USA": "USA"
-            }
-            
-            # Map abbreviation safely to team name
-            if abbrev in overrides:
-                mapped = overrides[abbrev]
-                for t in teams_in_match:
-                    if mapped.lower() in t.lower():
-                        team_batting = t
-                        break
-            
-            # Dynamic mapping fallback
-            if not team_batting:
-                for t in teams_in_match:
-                    words = t.split()
-                    if len(words) > 1:
-                        initials = "".join([w[0].upper() for w in words])
-                        if abbrev == initials or abbrev.endswith(initials):
+            # --- SMART BATTING TEAM DETECTOR ---
+            abbrev_match = re.search(r'^([A-Za-z]+)', full_score_text)
+            if abbrev_match:
+                abbrev = abbrev_match.group(1).upper()
+                teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
+                
+                overrides = {
+                    "RSA": "South Africa", "SA": "South Africa",
+                    "IND": "India", "AUS": "Australia", 
+                    "ENG": "England", "NZ": "New Zealand",
+                    "PAK": "Pakistan", "SL": "Sri Lanka", "SRI": "Sri Lanka",
+                    "WI": "West Indies", "BAN": "Bangladesh", "ZIM": "Zimbabwe",
+                    "AFG": "Afghanistan", "IRE": "Ireland"
+                }
+                
+                if abbrev in overrides:
+                    mapped = overrides[abbrev]
+                    for t in teams_in_match:
+                        if mapped.lower() in t.lower():
                             team_batting = t
                             break
-                    if t.upper().startswith(abbrev):
+                
+                if not team_batting:
+                    for t in teams_in_match:
+                        words = t.split()
+                        if len(words) > 1:
+                            initials = "".join([w[0].upper() for w in words])
+                            if abbrev == initials or abbrev.endswith(initials):
+                                team_batting = t
+                                break
+                        if t.upper().startswith(abbrev):
+                            team_batting = t
+                            break
+
+            if not team_batting and status_text:
+                teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
+                for t in teams_in_match:
+                    if f"{t.lower()} need" in status_lower or f"{t.lower()} require" in status_lower or f"{t.lower()} trail" in status_lower:
                         team_batting = t
                         break
 
-        # Status text fallback if abbreviations fail (e.g. "South Africa need 50 runs")
-        if not team_batting and status_text:
-            teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
-            for t in teams_in_match:
-                if f"{t.lower()} need" in status_lower or f"{t.lower()} require" in status_lower or f"{t.lower()} trail" in status_lower:
-                    team_batting = t
-                    break
+            # Parse numbers
+            p = score_div.find_all("div")
+            if p:
+                runs_text = p[0].get_text(strip=True).replace(",", "")
+                runs = int("".join(filter(str.isdigit, runs_text)) or 0)
 
-        p = score_div.find_all("div")
-        if not p:
-            return
+                if len(p) > 1:
+                    w_text = p[1].get_text(strip=True).replace("-", "").replace("/", "")
+                    wickets = int(w_text) if w_text.isdigit() else 0
 
-        runs_text = p[0].get_text(strip=True).replace(",", "")
-        runs = int("".join(filter(str.isdigit, runs_text)) or 0)
+                if len(p) > 2:
+                    overs_raw = p[2].get_text(strip=True).replace("(", "").replace(")", "")
 
-        wickets = 0
-        if len(p) > 1:
-            w_text = p[1].get_text(strip=True).replace("-", "").replace("/", "")
-            wickets = int(w_text) if w_text.isdigit() else 0
+                cur_overs = float(overs_raw) if overs_raw.replace(".", "", 1).isdigit() else 0.0
+                cur_balls = overs_to_balls(overs_raw)
+                score_display = f"{team_batting} {runs}/{wickets}" if team_batting else f"{runs}/{wickets}"
 
-        overs_raw = ""
-        if len(p) > 2:
-            overs_raw = p[2].get_text(strip=True).replace("(", "").replace(")", "")
-
-        cur_overs = float(overs_raw) if overs_raw.replace(".", "", 1).isdigit() else 0.0
-        cur_balls = overs_to_balls(overs_raw)
-        score_display = f"{team_batting} {runs}/{wickets}" if team_batting else f"{runs}/{wickets}"
-
-        # 4. COMMENTARY LOGIC
+        # 3. GET COMMENTARY
         commentary_text = ""
         cm = soup.find("div", class_=lambda x: x and "leading-6" in x)
         if cm:
@@ -596,83 +558,124 @@ def fetch_match_update(match_url, match_name):
         event_text = status_text if status_text else commentary_text
         event_lower = event_text.lower()
 
-        # 5. STATE MANAGEMENT
+        # 4. LOAD DATABASE STATE
         is_new_match = False
         try:
             row = cursor.execute(
-                "SELECT last_over, last_wickets, toss_done, last_wicket_over FROM state WHERE m_id=?",
+                "SELECT last_over, last_wickets, toss_done, last_wicket_over, innings FROM state WHERE m_id=?",
                 (m_id,),
             ).fetchone()
             if row:
-                last_ov, last_wk, toss_done, last_wk_ov = row
+                last_ov, last_wk, toss_done, last_wk_ov, current_innings = row
             else:
-                last_ov, last_wk, toss_done, last_wk_ov = (0.0, 0, 0, -10.0)
+                last_ov, last_wk, toss_done, last_wk_ov, current_innings = (0.0, 0, 0, -10.0, 1)
                 is_new_match = True
         except Exception:
-            last_ov, last_wk, toss_done, last_wk_ov = (0.0, 0, 0, -10.0)
+            last_ov, last_wk, toss_done, last_wk_ov, current_innings = (0.0, 0, 0, -10.0, 1)
             is_new_match = True
 
+        # Detect Innings switch natively
         if cur_overs < last_ov - 5:
             last_ov = 0.0
             last_wk = 0
             last_wk_ov = -10.0
+            current_innings = 2
 
         is_innings_break = (wickets == 10 and not is_match_over) or any(
-            phrase in status_lower
-            for phrase in ["innings break", "target", "stumps", "lunch", "tea"]
+            phrase in status_lower for phrase in ["innings break", "target", "stumps", "lunch", "tea"]
         )
 
+        # Build Match Facts Dict for the AI
+        match_facts = {
+            "match_name": match_name,
+            "event_type": "LIVE UPDATE",
+            "team_batting": team_batting,
+            "score_display": score_display,
+            "status_text": status_text,
+            "raw_data": full_score_text + " " + commentary_text
+        }
+
+        # Handle New Match Edge Cases
         if is_new_match:
             try:
                 cursor.execute(
-                    "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)",
-                    (m_id, cur_overs, wickets, toss_done, cur_overs),
+                    "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings) VALUES (?,?,?,?,?,?)",
+                    (m_id, cur_overs, wickets, toss_done, cur_overs, current_innings),
                 )
             except sqlite3.Error:
                 pass
-
+            if is_match_over:
+                cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_MATCH_END",))
+                cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
             if is_innings_break:
-                cursor.execute(
-                    "INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_INNINGS_BREAK_{runs}",)
-                )
-
+                cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_INNINGS_BREAK_{runs}",))
             if wickets >= 3:
                 cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_COLLAPSE_3WK",))
-
             conn.commit()
             return
 
         msg = None
 
-        if any(x in status_lower for x in ["rain", "drizzle", "interrupted", "delayed", "covers"]):
+        # ==========================================
+        # 🚨 THE STRICT EVENT HIERARCHY 🚨
+        # ==========================================
+
+        # 1. MATCH END LOGIC (Blocks over updates)
+        if is_match_over:
+            eid = f"{m_id}_MATCH_END"
+            if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                match_facts["event_type"] = "MATCH_END"
+                msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n🔹 {match_name}\n🔹 Final Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Coverage concluded.*"
+                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+                cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
+                conn.commit()
+                send_telegram(msg, pro_edit=True, match_facts=match_facts)
+            return # EXIT IMMEDIATELY!
+
+        # 2. INNINGS BREAK
+        elif is_innings_break:
+            eid = f"{m_id}_INNINGS_BREAK_{runs}"
+            if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                match_facts["event_type"] = "INNINGS_BREAK"
+                msg = f"🛑 *INNINGS COMPLETED* 🛑\n—————————————————\n🏏 *{match_name}* finishes their innings.\n\n📊 *FINAL SCORE:* *{score_display}*\n🎯 *UPDATE:* _{status_text}_\n\n🖼 [Tap for Match Gallery]({get_img_link(match_name)})\n—————————————————\n🕒 _Second innings starts shortly._"
+                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+
+        # 3. WEATHER ALERTS
+        elif any(x in status_lower for x in ["rain", "drizzle", "interrupted", "delayed", "covers"]):
             eid = f"{m_id}_RAIN_{stable_event_suffix(status_text)}"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                match_facts["event_type"] = "WEATHER_DELAY"
                 msg = f"🌦 *WEATHER ALERT: {match_name}* 🌦\n—————————————————\n⚠️ {status_text}\n\n🕒 Match currently interrupted. Stay tuned for restart updates!"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        elif not msg and wickets > last_wk:
+        # 4. WICKET LOGIC
+        elif wickets > last_wk:
             new_wk_ov = cur_overs
             if wickets == 3 and cur_overs <= 6.0 and last_wk < 3:
                 eid = f"{m_id}_COLLAPSE_3WK"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                    match_facts["event_type"] = "BATTING_COLLAPSE"
                     msg = f"🚨 *EARLY COLLAPSE* 🚨\n—————————————————\n💥 Huge trouble early on!\n\n🏏 *MATCH:* {match_name}\n📊 *SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST WICKET:* _{event_text}_\n\n🖼 [Tap for Match Action]({get_img_link(match_name)})\n—————————————————\n📉 *The batting side is under massive pressure!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
             elif last_wk_ov > 0 and abs(cur_balls - overs_to_balls(str(last_wk_ov))) <= 6 and wickets > 1:
                 eid = f"{m_id}_DOUBLE_STRIKE_{wickets}"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
+                    match_facts["event_type"] = "DOUBLE_WICKET"
                     msg = f"🔥 *DOUBLE STRIKE* 🔥\n—————————————————\n🎯 Two quick wickets have changed the momentum!\n\n🏏 *MATCH:* {match_name}\n📊 *NEW SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST:* _{event_text}_\n\n🖼 [Tap for Celebration Photos]({get_img_link(match_name)})\n—————————————————\n⚠️ *Huge turning point in the game!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
             last_wk_ov = new_wk_ov
 
-        elif not msg and is_innings_break:
-            eid = f"{m_id}_INNINGS_BREAK_{runs}"
-            if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
-                msg = f"🛑 *INNINGS COMPLETED* 🛑\n—————————————————\n🏏 *{match_name}* finishes their innings.\n\n📊 *FINAL SCORE:* *{score_display}*\n🎯 *UPDATE:* _{status_text}_\n\n🖼 [Tap for Match Gallery]({get_img_link(match_name)})\n—————————————————\n🕒 _Second innings starts shortly._"
-                cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-
+        # 5. OVER MILESTONES (FORMAT AWARE)
         elif not msg:
             is_t20 = "T20" in match_name.upper()
-            milestones = [6, 10, 15, 20] if is_t20 else [10, 20, 30, 40, 50, 60, 70, 80, 90]
+            is_odi = "ODI" in match_name.upper()
+            
+            if is_t20:
+                milestones = [6, 10, 15, 20]
+            elif is_odi:
+                milestones = [10, 20, 30, 40, 50]
+            else:
+                milestones = [10, 20, 30, 40, 50, 60, 70, 80, 90]
 
             passed_m = None
             for m in milestones:
@@ -681,19 +684,20 @@ def fetch_match_update(match_url, match_name):
                     break
 
             if passed_m:
-                eid = f"{m_id}_OV_{passed_m}_{runs}"
+                eid = f"{m_id}_OV_{passed_m}_{runs}_{current_innings}"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                     crr = f"{(runs / cur_overs):.2f}" if cur_overs else "N/A"
-
                     phase_header = f"{passed_m}-OVER"
                     if is_t20 and passed_m == 6:
                         phase_header = "POWERPLAY END"
                     elif is_t20 and passed_m in [15, 20]:
                         phase_header = "DEATH OVERS"
 
+                    match_facts["event_type"] = f"{phase_header} SUMMARY"
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
+        # 6. PLAYER MILESTONES (50 / 100)
         if not msg:
             event_type = None
             speed_alert = ""
@@ -707,9 +711,7 @@ def fetch_match_update(match_url, match_name):
                 event_type = "50"
                 if balls_faced <= 25:
                     speed_alert = "⚡ EXPLOSIVE INNINGS ⚡\n"
-            elif any(
-                x in event_lower for x in ["century", "hundred", "100 runs", "reaches 100"]
-            ):
+            elif any(x in event_lower for x in ["century", "hundred", "100 runs", "reaches 100"]):
                 event_type = "100"
                 if balls_faced <= 50:
                     speed_alert = "⚡ SENSATIONAL CENTURY ⚡\n"
@@ -720,23 +722,23 @@ def fetch_match_update(match_url, match_name):
                     header = f"🔥 *{event_type} REACHED!* 🔥"
                     if speed_alert:
                         header = f"{speed_alert}{header}"
-
+                    
+                    match_facts["event_type"] = f"PLAYER {event_type} MILESTONE"
                     msg = f"{header}\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *What a knock! Share the news!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
+        # FIRE TELEGRAM MESSAGE
         if msg:
-            send_telegram(msg, pro_edit=True, team_batting=team_batting)
+            send_telegram(msg, pro_edit=True, match_facts=match_facts)
 
+        # UPDATE DB STATE
         try:
             cursor.execute(
-                "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over) VALUES (?,?,?,?,?)",
-                (m_id, cur_overs, wickets, toss_done, last_wk_ov),
+                "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings) VALUES (?,?,?,?,?,?)",
+                (m_id, cur_overs, wickets, toss_done, last_wk_ov, current_innings),
             )
         except sqlite3.Error:
-            cursor.execute(
-                "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done) VALUES (?,?,?,?)",
-                (m_id, cur_overs, wickets, toss_done),
-            )
+            pass
 
         conn.commit()
     except Exception as e:
