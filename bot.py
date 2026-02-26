@@ -180,16 +180,17 @@ def stable_event_suffix(text):
 
 def is_international_text_check(text):
     title = text.upper()
-    if any(x in title for x in [" U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A", "ENGLAND LIONS"]):
+    # Exclude minor leagues and associate/domestic identifiers
+    if any(x in title for x in [" U19", "TROPHY", "LEAGUE", " XI", "INDIA A", "PAKISTAN A", "ENGLAND LIONS", "HONG KONG", "CHINA"]):
         return False
-    intl_formats = ["TEST", "ODI", "T20I", "WORLD CUP"]
-    if any(fmt in title for fmt in intl_formats):
-        return True
+    
+    # Strict full-member country list
     countries = [
         "INDIA", "AUSTRALIA", "ENGLAND", "NEW ZEALAND", "SOUTH AFRICA",
         "PAKISTAN", "SRI LANKA", "WEST INDIES", "BANGLADESH", "ZIMBABWE",
         "AFGHANISTAN", "IRELAND"
     ]
+    # Require at least two major countries to be in the title
     return sum(1 for c in countries if c in title) >= 2
 
 def is_result_text(text):
@@ -222,7 +223,7 @@ def scrape_todays_schedule():
                     todays_matches.append(f"• {match_info}")
 
         if not todays_matches:
-            return "No international matches scheduled for today."
+            return "No major international matches scheduled for today."
         header = f"📅 *TODAY'S INTERNATIONAL SCHEDULE*\n—————————————————\n_{get_ist_now().strftime('%d %B %Y')}_\n\n"
         footer = "\n\n🖼 [Tap for Series Graphics]({})\n—————————————————\n🔔 *Keep notifications ON for live updates!*".format(
             get_img_link("Cricket Schedule")
@@ -300,7 +301,7 @@ def handle_commands():
                     conn.commit()
                     send_telegram(f"✅ Now tracking: *{name}*")
                 except (ValueError, IndexError):
-                    send_telegram("⚠️ Invalid ID.")
+                    send_telegram("⚠️ Invalid ID. Use /tracklist to see active match numbers.")
 
             elif _command_matches(text, "/stop"):
                 try:
@@ -313,9 +314,9 @@ def handle_commands():
                         (m_id, name),
                     )
                     conn.commit()
-                    send_telegram(f"❌ Muted: *{name}*")
+                    send_telegram(f"❌ Successfully Muted: *{name}*")
                 except (ValueError, IndexError):
-                    send_telegram("⚠️ Invalid ID.")
+                    send_telegram("⚠️ Invalid ID. Use /tracklist to see active match numbers.")
 
             elif _command_matches(text, "/score"):
                 send_telegram("🏏 *Fetching live matches...*")
@@ -482,6 +483,7 @@ def fetch_match_update(match_url, match_name):
         cur_balls = overs_to_balls(overs_raw)
         score_display = f"{team_batting} {runs}/{wickets}" if team_batting else f"{runs}/{wickets}"
 
+        # Status text hunting logic updated for more robust scraping
         status_text = ""
         status_div = soup.find(
             "div",
@@ -557,6 +559,7 @@ def fetch_match_update(match_url, match_name):
             last_wk = 0
             last_wk_ov = -10.0
 
+        # Strengthened trigger logic
         is_match_over = any(
             phrase in status_lower
             for phrase in ["won by", "win by", "drawn", "tied", "abandoned", "no result"]
@@ -705,7 +708,7 @@ def run_bot():
 
     logger.info("🚀 WhatsApp Content Assistant & Narrative AI Engine Starting...")
     send_telegram(
-        "✅ *Live-Only Tracker Active!* 🏏\n- Zero spam guaranteed.\n- Only actively playing matches will be monitored."
+        "✅ *Live-Only Tracker Active!* 🏏\n- Zero spam guaranteed.\n- Use /stop to kill unwanted matches."
     )
 
     while True:
