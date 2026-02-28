@@ -362,14 +362,9 @@ def scrape_match_links():
             if not name or not is_international_text_check(name):
                 continue
 
-            parent_div = a_tag.find_parent()
-            parent_text = (
-                parent_div.get_text(separator=" ", strip=True).lower() if parent_div else ""
-            )
+            # REMOVED THE HARD FILTER: We now allow matches with results to pass through
+            # so fetch_match_update can process the "MATCH_END" event.
             
-            if is_result_text(parent_text):
-                continue
-
             full_link = "https://www.cricbuzz.com" + href if href.startswith("/") else href
             if not any(full_link == m[1] for m in matches):
                 matches.append((name, full_link))
