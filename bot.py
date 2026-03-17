@@ -91,6 +91,7 @@ STRICT CURRENT FACTS TO USE:
 - Match: {match_facts.get('match_name', 'Unknown')}
 - Event: {match_facts.get('event_type', 'LIVE UPDATE')}
 - Batting Team: {match_facts.get('team_batting', 'Unknown')}
+- Bowling Team: {match_facts.get('team_bowling', 'Unknown')}
 - Score: {match_facts.get('score_display', 'Unknown')}
 - Official Status: {match_facts.get('status_text', '')}
 
@@ -198,6 +199,11 @@ def is_result_text(text):
     lower = (text or "").lower()
     return any(phrase in lower for phrase in RESULT_PHRASES)
 
+def is_womens_match(match_name):
+    # Detects if a match is a women's game to auto-mute it
+    name_up = match_name.upper()
+    return "WOMEN" in name_up or " W " in name_up or name_up.endswith(" W")
+
 # =====================
 # DAILY BRIEFING FEATURE
 # =====================
@@ -285,7 +291,12 @@ def handle_commands():
                         row = cursor.execute(
                             "SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)
                         ).fetchone()
-                        status = "✅ Tracking" if (not row or row[0] == 1) else "❌ Muted"
+                        
+                        # Apply Women's default mute logic
+                        default_active = 0 if is_womens_match(name) else 1
+                        is_active = row[0] if row else default_active
+                        
+                        status = "✅ Tracking" if is_active == 1 else "❌ Muted"
                         report += f"*{i + 1}.* {name}\nStatus: {status}\nToggle: `/track {i + 1}` or `/stop {i + 1}`\n\n"
                     send_telegram(report)
 
@@ -470,6 +481,7 @@ def fetch_match_update(match_url, match_name):
         score_div = soup.find("div", class_=lambda x: x and (("text-3xl" in x and "font-bold" in x) or "cb-font-20" in x))
         
         team_batting = ""
+        team_bowling = "Unknown"
         runs, wickets = 0, 0
         overs_raw = ""
         cur_overs, cur_balls = 0.0, 0
@@ -479,8 +491,12 @@ def fetch_match_update(match_url, match_name):
         if score_div:
             full_score_text = score_div.get_text(separator=" ", strip=True)
             
+            # --- FIX: ISOLATE THE ACTIVE INNINGS ---
+            # Splits the score by '&' so it only grabs the team currently batting
+            active_score_text = full_score_text.split('&')[-1].strip()
+            
             # --- SMART BATTING TEAM DETECTOR ---
-            abbrev_match = re.search(r'^([A-Za-z]+)', full_score_text)
+            abbrev_match = re.search(r'^([A-Za-z]+)', active_score_text)
             if abbrev_match:
                 abbrev = abbrev_match.group(1).upper()
                 teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
@@ -519,10 +535,19 @@ def fetch_match_update(match_url, match_name):
                     if f"{t.lower()} need" in status_lower or f"{t.lower()} require" in status_lower or f"{t.lower()} trail" in status_lower:
                         team_batting = t
                         break
+            
+            # --- BOWLING TEAM IDENTIFICATION ---
+            teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
+            if team_batting:
+                for t in teams_in_match:
+                    if t.lower() != team_batting.lower():
+                        team_bowling = t
+                        break
 
             # Parse numbers
             p = score_div.find_all("div")
             if p:
+                # Still taking from p to preserve your existing runs/wickets extractor
                 runs_text = p[0].get_text(strip=True).replace(",", "")
                 runs = int("".join(filter(str.isdigit, runs_text)) or 0)
 
@@ -585,6 +610,7 @@ def fetch_match_update(match_url, match_name):
             "match_name": match_name,
             "event_type": "LIVE UPDATE",
             "team_batting": team_batting,
+            "team_bowling": team_bowling,
             "score_display": score_display,
             "status_text": status_text,
             "raw_data": full_score_text + " " + commentary_text
@@ -761,7 +787,10 @@ def run_bot():
                 row = cursor.execute(
                     "SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)
                 ).fetchone()
-                is_tracking = row[0] if row else 1
+                
+                # Apply default mute logic for Women's matches
+                default_active = 0 if is_womens_match(name) else 1
+                is_tracking = row[0] if row else default_active
 
                 if is_tracking == 0:
                     continue
