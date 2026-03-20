@@ -43,13 +43,16 @@ try:
         "CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)"
     )
 
-    try:
-        cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
-        cursor.execute("ALTER TABLE state ADD COLUMN innings INTEGER DEFAULT 1")
-        # NEW: Column to track exactly when the last double strike alert fired
-        cursor.execute("ALTER TABLE state ADD COLUMN last_double_strike_wk INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass # Columns already exist
+    # FIX: Isolate ALTER TABLE statements so one existing column doesn't break the others
+    try: cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
+    except sqlite3.OperationalError: pass
+    
+    try: cursor.execute("ALTER TABLE state ADD COLUMN innings INTEGER DEFAULT 1")
+    except sqlite3.OperationalError: pass
+    
+    try: cursor.execute("ALTER TABLE state ADD COLUMN last_double_strike_wk INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+    
     conn.commit()
 except Exception as e:
     logger.error(f"Database Initialization Error: {e}")
@@ -369,9 +372,7 @@ def scrape_match_links():
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
             
-            # FIXED: Removed the strict "/live-cricket-scores/" filter. 
-            # We now allow "/cricket-scores/" to pass through so we can catch matches 
-            # that have *just* finished and grab the "Match End" event.
+            # Allow /cricket-scores/ so we don't drop matches the second they finish
             if "/live-cricket-scores/" not in href and "/cricket-scores/" not in href:
                 continue
 
@@ -435,7 +436,6 @@ def fetch_toss_update(match_url, match_name):
     if match_state[match_url]["toss_sent"]:
         return
 
-    # Handle the fact that the URL might be /cricket-scores/ now instead of /live-cricket-scores/
     scorecard_url = match_url.replace("live-cricket-scores", "live-cricket-scorecard").replace("cricket-scores", "live-cricket-scorecard").replace("www.cricbuzz.com", "m.cricbuzz.com")
     
     try:
@@ -455,7 +455,6 @@ def fetch_toss_update(match_url, match_name):
 
         msg = f"🪙 *TOSS UPDATE* 🪙\n—————————————————\n🏆 *{match_name}*\n\n🏟 *{toss_text}*\n\n🖼 [Tap for Toss Photos]({get_img_link(match_name + ' Toss')})\n—————————————————\n🏏 _Match starting soon! Get ready!_"
         
-        # Mock match facts just for the toss
         mf = {"match_name": match_name, "event_type": "TOSS", "status_text": toss_text, "innings": 1}
         send_telegram(msg, pro_edit=True, match_facts=mf)
     except Exception as exc:
@@ -481,7 +480,7 @@ def fetch_match_update(match_url, match_name):
         status_lower = status_text.lower()
         is_match_over = is_result_text(status_lower)
 
-        # 4. LOAD DATABASE STATE (Moved up to help with team logic)
+        # 4. LOAD DATABASE STATE
         is_new_match = False
         try:
             row = cursor.execute(
@@ -512,7 +511,6 @@ def fetch_match_update(match_url, match_name):
             full_score_text = score_div.get_text(separator=" ", strip=True)
             
             # --- FIX: ISOLATE THE ACTIVE INNINGS ---
-            # Splits the score by '&' so it only grabs the team currently batting
             active_score_text = full_score_text.split('&')[-1].strip()
             
             # --- SMART BATTING TEAM DETECTOR ---
@@ -598,7 +596,6 @@ def fetch_match_update(match_url, match_name):
         event_text = status_text if status_text else commentary_text
         event_lower = event_text.lower()
 
-
         # Detect Innings switch natively
         if cur_overs < last_ov - 5:
             last_ov = 0.0
@@ -623,24 +620,22 @@ def fetch_match_update(match_url, match_name):
             "raw_data": full_score_text + " " + commentary_text
         }
 
-        # Handle New Match Edge Cases
+        # FIX: The Database Loop Bug
+        # We process DB insert for new match, but DO NOT silently return if the match is already over 
+        # or at a break. This allows the bot to send the Winning/Innings post immediately.
         if is_new_match:
             try:
                 cursor.execute(
                     "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings, last_double_strike_wk) VALUES (?,?,?,?,?,?,?)",
                     (m_id, cur_overs, wickets, toss_done, cur_overs, current_innings, last_double_strike_wk),
                 )
+                conn.commit()
             except sqlite3.Error:
                 pass
-            if is_match_over:
-                cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_MATCH_END",))
-                cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
-            if is_innings_break:
-                cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_INNINGS_BREAK_{runs}",))
-            if wickets >= 3:
-                cursor.execute("INSERT OR IGNORE INTO events VALUES (?)", (f"{m_id}_COLLAPSE_3WK",))
-            conn.commit()
-            return
+            
+            # Return early ONLY if it's mid-game. 
+            if not is_match_over and not is_innings_break and wickets < 3:
+                return
 
         msg = None
 
@@ -655,10 +650,20 @@ def fetch_match_update(match_url, match_name):
                 match_facts["event_type"] = "MATCH_END"
                 msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n🔹 {match_name}\n🔹 Final Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Coverage concluded.*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-                # Un-comment the line below if you want the bot to automatically mute the match after it finishes
+                
+                # Un-comment the line below if you want the bot to auto-mute finished matches
                 # cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
                 conn.commit()
                 send_telegram(msg, pro_edit=True, match_facts=match_facts)
+            
+            # Must update state even on Match End
+            try:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings, last_double_strike_wk) VALUES (?,?,?,?,?,?,?)",
+                    (m_id, cur_overs, wickets, toss_done, last_wk_ov, current_innings, last_double_strike_wk),
+                )
+                conn.commit()
+            except sqlite3.Error: pass
             return # EXIT IMMEDIATELY!
 
         # 2. INNINGS BREAK
@@ -688,7 +693,6 @@ def fetch_match_update(match_url, match_name):
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
             
             # --- FIX: DOUBLE STRIKE RESET LOGIC ---
-            # Check if 2 wickets fell in last 6 balls AND make sure we haven't already alerted for this specific pair
             elif last_wk_ov > 0 and abs(cur_balls - overs_to_balls(str(last_wk_ov))) <= 6 and wickets >= last_double_strike_wk + 2:
                 eid = f"{m_id}_DOUBLE_STRIKE_{wickets}"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
@@ -714,6 +718,7 @@ def fetch_match_update(match_url, match_name):
 
             passed_m = None
             for m in milestones:
+                # FIX: `last_ov` is now always up-to-date at the bottom of the loop
                 if last_ov < m and cur_overs >= m:
                     passed_m = m
                     break
@@ -766,7 +771,7 @@ def fetch_match_update(match_url, match_name):
         if msg:
             send_telegram(msg, pro_edit=True, match_facts=match_facts)
 
-        # UPDATE DB STATE
+        # UPDATE DB STATE - FIX: This must always fire to ensure tracking doesn't stall
         try:
             cursor.execute(
                 "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings, last_double_strike_wk) VALUES (?,?,?,?,?,?,?)",
