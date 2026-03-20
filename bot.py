@@ -368,7 +368,11 @@ def scrape_match_links():
 
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
-            if "/live-cricket-scores/" not in href:
+            
+            # FIXED: Removed the strict "/live-cricket-scores/" filter. 
+            # We now allow "/cricket-scores/" to pass through so we can catch matches 
+            # that have *just* finished and grab the "Match End" event.
+            if "/live-cricket-scores/" not in href and "/cricket-scores/" not in href:
                 continue
 
             name = a_tag.get("title", "").strip() or a_tag.get_text(
@@ -377,9 +381,6 @@ def scrape_match_links():
             if not name or not is_international_text_check(name):
                 continue
 
-            # REMOVED THE HARD FILTER: We now allow matches with results to pass through
-            # so fetch_match_update can process the "MATCH_END" event.
-            
             full_link = "https://www.cricbuzz.com" + href if href.startswith("/") else href
             if not any(full_link == m[1] for m in matches):
                 matches.append((name, full_link))
@@ -434,10 +435,9 @@ def fetch_toss_update(match_url, match_name):
     if match_state[match_url]["toss_sent"]:
         return
 
-    scorecard_url = (
-        match_url.replace("live-cricket-scores", "live-cricket-scorecard")
-        .replace("www.cricbuzz.com", "m.cricbuzz.com")
-    )
+    # Handle the fact that the URL might be /cricket-scores/ now instead of /live-cricket-scores/
+    scorecard_url = match_url.replace("live-cricket-scores", "live-cricket-scorecard").replace("cricket-scores", "live-cricket-scorecard").replace("www.cricbuzz.com", "m.cricbuzz.com")
+    
     try:
         response = requests.get(scorecard_url, headers=HEADERS, timeout=15)
         if response.status_code != 200:
@@ -655,7 +655,8 @@ def fetch_match_update(match_url, match_name):
                 match_facts["event_type"] = "MATCH_END"
                 msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n🔹 {match_name}\n🔹 Final Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Coverage concluded.*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-                cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
+                # Un-comment the line below if you want the bot to automatically mute the match after it finishes
+                # cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
                 conn.commit()
                 send_telegram(msg, pro_edit=True, match_facts=match_facts)
             return # EXIT IMMEDIATELY!
