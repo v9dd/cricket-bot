@@ -46,6 +46,8 @@ try:
     try:
         cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
         cursor.execute("ALTER TABLE state ADD COLUMN innings INTEGER DEFAULT 1")
+        # NEW: Column to track exactly when the last double strike alert fired
+        cursor.execute("ALTER TABLE state ADD COLUMN last_double_strike_wk INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass # Columns already exist
     conn.commit()
@@ -92,6 +94,7 @@ STRICT CURRENT FACTS TO USE:
 - Event: {match_facts.get('event_type', 'LIVE UPDATE')}
 - Batting Team: {match_facts.get('team_batting', 'Unknown')}
 - Bowling Team: {match_facts.get('team_bowling', 'Unknown')}
+- Current Innings: {match_facts.get('innings', 1)}
 - Score: {match_facts.get('score_display', 'Unknown')}
 - Official Status: {match_facts.get('status_text', '')}
 
@@ -100,7 +103,8 @@ RULES:
 2. IMPORTANT: Use a double newline (\n\n) between paragraphs.
 3. Total Length: 3-4 sentences.
 4. STRICT: If 'Event' is MATCH_END, the post must celebrate the winner from the 'Official Status'. 
-5. NEVER invent stats not provided in the 'STRICT CURRENT FACTS' above.
+5. STRICT: If 'Current Innings' is 2, DO NOT mention who won the toss in your summary. Focus ONLY on the chase.
+6. NEVER invent stats not provided in the 'STRICT CURRENT FACTS' above.
 """
 
     data = {
@@ -109,7 +113,7 @@ RULES:
             {"role": "system", "content": "You are an elite cricket news editor who mirror's the user's specific writing style examples perfectly."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.6, # Balanced: low enough for facts, high enough for good writing
+        "temperature": 0.5, # Slightly tightened to respect the new Innings rule
         "max_tokens": 145,
         "top_p": 0.9,
     }
@@ -452,7 +456,7 @@ def fetch_toss_update(match_url, match_name):
         msg = f"🪙 *TOSS UPDATE* 🪙\n—————————————————\n🏆 *{match_name}*\n\n🏟 *{toss_text}*\n\n🖼 [Tap for Toss Photos]({get_img_link(match_name + ' Toss')})\n—————————————————\n🏏 _Match starting soon! Get ready!_"
         
         # Mock match facts just for the toss
-        mf = {"match_name": match_name, "event_type": "TOSS", "status_text": toss_text}
+        mf = {"match_name": match_name, "event_type": "TOSS", "status_text": toss_text, "innings": 1}
         send_telegram(msg, pro_edit=True, match_facts=mf)
     except Exception as exc:
         logger.warning("fetch_toss_update failed: %s", exc)
@@ -476,6 +480,22 @@ def fetch_match_update(match_url, match_name):
 
         status_lower = status_text.lower()
         is_match_over = is_result_text(status_lower)
+
+        # 4. LOAD DATABASE STATE (Moved up to help with team logic)
+        is_new_match = False
+        try:
+            row = cursor.execute(
+                "SELECT last_over, last_wickets, toss_done, last_wicket_over, innings, last_double_strike_wk FROM state WHERE m_id=?",
+                (m_id,),
+            ).fetchone()
+            if row:
+                last_ov, last_wk, toss_done, last_wk_ov, current_innings, last_double_strike_wk = row
+            else:
+                last_ov, last_wk, toss_done, last_wk_ov, current_innings, last_double_strike_wk = (0.0, 0, 0, -10.0, 1, 0)
+                is_new_match = True
+        except Exception:
+            last_ov, last_wk, toss_done, last_wk_ov, current_innings, last_double_strike_wk = (0.0, 0, 0, -10.0, 1, 0)
+            is_new_match = True
 
         # 2. EXTRACT SCORE & TEAM LOGIC
         score_div = soup.find("div", class_=lambda x: x and (("text-3xl" in x and "font-bold" in x) or "cb-font-20" in x))
@@ -529,6 +549,7 @@ def fetch_match_update(match_url, match_name):
                             team_batting = t
                             break
 
+            # Fallback if Cricbuzz formatting is weird
             if not team_batting and status_text:
                 teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
                 for t in teams_in_match:
@@ -547,7 +568,6 @@ def fetch_match_update(match_url, match_name):
             # Parse numbers
             p = score_div.find_all("div")
             if p:
-                # Still taking from p to preserve your existing runs/wickets extractor
                 runs_text = p[0].get_text(strip=True).replace(",", "")
                 runs = int("".join(filter(str.isdigit, runs_text)) or 0)
 
@@ -578,27 +598,13 @@ def fetch_match_update(match_url, match_name):
         event_text = status_text if status_text else commentary_text
         event_lower = event_text.lower()
 
-        # 4. LOAD DATABASE STATE
-        is_new_match = False
-        try:
-            row = cursor.execute(
-                "SELECT last_over, last_wickets, toss_done, last_wicket_over, innings FROM state WHERE m_id=?",
-                (m_id,),
-            ).fetchone()
-            if row:
-                last_ov, last_wk, toss_done, last_wk_ov, current_innings = row
-            else:
-                last_ov, last_wk, toss_done, last_wk_ov, current_innings = (0.0, 0, 0, -10.0, 1)
-                is_new_match = True
-        except Exception:
-            last_ov, last_wk, toss_done, last_wk_ov, current_innings = (0.0, 0, 0, -10.0, 1)
-            is_new_match = True
 
         # Detect Innings switch natively
         if cur_overs < last_ov - 5:
             last_ov = 0.0
             last_wk = 0
             last_wk_ov = -10.0
+            last_double_strike_wk = 0  # Reset for new innings
             current_innings = 2
 
         is_innings_break = (wickets == 10 and not is_match_over) or any(
@@ -611,6 +617,7 @@ def fetch_match_update(match_url, match_name):
             "event_type": "LIVE UPDATE",
             "team_batting": team_batting,
             "team_bowling": team_bowling,
+            "innings": current_innings,
             "score_display": score_display,
             "status_text": status_text,
             "raw_data": full_score_text + " " + commentary_text
@@ -620,8 +627,8 @@ def fetch_match_update(match_url, match_name):
         if is_new_match:
             try:
                 cursor.execute(
-                    "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings) VALUES (?,?,?,?,?,?)",
-                    (m_id, cur_overs, wickets, toss_done, cur_overs, current_innings),
+                    "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings, last_double_strike_wk) VALUES (?,?,?,?,?,?,?)",
+                    (m_id, cur_overs, wickets, toss_done, cur_overs, current_innings, last_double_strike_wk),
                 )
             except sqlite3.Error:
                 pass
@@ -678,12 +685,18 @@ def fetch_match_update(match_url, match_name):
                     match_facts["event_type"] = "BATTING_COLLAPSE"
                     msg = f"🚨 *EARLY COLLAPSE* 🚨\n—————————————————\n💥 Huge trouble early on!\n\n🏏 *MATCH:* {match_name}\n📊 *SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST WICKET:* _{event_text}_\n\n🖼 [Tap for Match Action]({get_img_link(match_name)})\n—————————————————\n📉 *The batting side is under massive pressure!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-            elif last_wk_ov > 0 and abs(cur_balls - overs_to_balls(str(last_wk_ov))) <= 6 and wickets > 1:
+            
+            # --- FIX: DOUBLE STRIKE RESET LOGIC ---
+            # Check if 2 wickets fell in last 6 balls AND make sure we haven't already alerted for this specific pair
+            elif last_wk_ov > 0 and abs(cur_balls - overs_to_balls(str(last_wk_ov))) <= 6 and wickets >= last_double_strike_wk + 2:
                 eid = f"{m_id}_DOUBLE_STRIKE_{wickets}"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                     match_facts["event_type"] = "DOUBLE_WICKET"
                     msg = f"🔥 *DOUBLE STRIKE* 🔥\n—————————————————\n🎯 Two quick wickets have changed the momentum!\n\n🏏 *MATCH:* {match_name}\n📊 *NEW SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST:* _{event_text}_\n\n🖼 [Tap for Celebration Photos]({get_img_link(match_name)})\n—————————————————\n⚠️ *Huge turning point in the game!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
+                    # Record that we sent an alert at this specific wicket count
+                    last_double_strike_wk = wickets 
+            
             last_wk_ov = new_wk_ov
 
         # 5. OVER MILESTONES (FORMAT AWARE)
@@ -755,8 +768,8 @@ def fetch_match_update(match_url, match_name):
         # UPDATE DB STATE
         try:
             cursor.execute(
-                "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings) VALUES (?,?,?,?,?,?)",
-                (m_id, cur_overs, wickets, toss_done, last_wk_ov, current_innings),
+                "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings, last_double_strike_wk) VALUES (?,?,?,?,?,?,?)",
+                (m_id, cur_overs, wickets, toss_done, last_wk_ov, current_innings, last_double_strike_wk),
             )
         except sqlite3.Error:
             pass
