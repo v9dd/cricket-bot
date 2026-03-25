@@ -43,7 +43,6 @@ try:
         "CREATE TABLE IF NOT EXISTS tracking_config (m_id TEXT PRIMARY KEY, match_name TEXT, is_active INTEGER DEFAULT 1)"
     )
 
-    # FIX: Isolate ALTER TABLE statements so one existing column doesn't break the others
     try: cursor.execute("ALTER TABLE state ADD COLUMN last_wicket_over REAL DEFAULT -10.0")
     except sqlite3.OperationalError: pass
     
@@ -73,7 +72,6 @@ def get_pro_edit(match_facts):
         "Content-Type": "application/json",
     }
 
-    # Restoring the "Flavor" with examples while maintaining "Fact Integrity"
     prompt = f"""You are a professional Cricket News Editor for a premium WhatsApp channel.
 Rewrite the raw match data into a CRISP NARRATIVE post.
 
@@ -116,7 +114,7 @@ RULES:
             {"role": "system", "content": "You are an elite cricket news editor who mirror's the user's specific writing style examples perfectly."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.5, # Slightly tightened to respect the new Innings rule
+        "temperature": 0.5, 
         "max_tokens": 145,
         "top_p": 0.9,
     }
@@ -139,7 +137,6 @@ def send_telegram(raw_text, pro_edit=False, match_facts=None):
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    # 1. SEND RAW TEXT FIRST
     try:
         requests.post(
             url,
@@ -154,7 +151,6 @@ def send_telegram(raw_text, pro_edit=False, match_facts=None):
     except requests.RequestException as exc:
         logger.warning("send_telegram raw failed: %s", exc)
 
-    # 2. SEND AI VERSION SECOND (Without "PRO EDIT" label)
     if pro_edit and GROQ_API_KEY and match_facts:
         ai_text = get_pro_edit(match_facts)
         if ai_text:
@@ -207,7 +203,6 @@ def is_result_text(text):
     return any(phrase in lower for phrase in RESULT_PHRASES)
 
 def is_womens_match(match_name):
-    # Detects if a match is a women's game to auto-mute it
     name_up = match_name.upper()
     return "WOMEN" in name_up or " W " in name_up or name_up.endswith(" W")
 
@@ -299,7 +294,6 @@ def handle_commands():
                             "SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)
                         ).fetchone()
                         
-                        # Apply Women's default mute logic
                         default_active = 0 if is_womens_match(name) else 1
                         is_active = row[0] if row else default_active
                         
@@ -372,7 +366,6 @@ def scrape_match_links():
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
             
-            # Allow /cricket-scores/ so we don't drop matches the second they finish
             if "/live-cricket-scores/" not in href and "/cricket-scores/" not in href:
                 continue
 
@@ -460,13 +453,19 @@ def fetch_toss_update(match_url, match_name):
     except Exception as exc:
         logger.warning("fetch_toss_update failed: %s", exc)
 
+def get_teams_from_name(match_name):
+    teams = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
+    if len(teams) >= 2:
+        return teams[0], teams[1]
+    return "Team A", "Team B"
+
 def fetch_match_update(match_url, match_name):
     try:
         response = requests.get(match_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
         m_id = match_url.split("/")[-2] if "/" in match_url else stable_event_suffix(match_name)
 
-        # 1. GET STATUS TEXT FIRST (To catch Match End reliably)
+        # 1. GET STATUS TEXT FIRST 
         status_text = ""
         status_div = soup.find("div", class_=lambda x: x and any(c in x for c in ["text-cb-danger", "text-cb-info", "text-cb-success", "cb-text-complete", "cb-text-abandon"]))
         if status_div:
@@ -507,61 +506,44 @@ def fetch_match_update(match_url, match_name):
         score_display = ""
         full_score_text = ""
 
+        # --- BULLETPROOF TEAM DETECTOR ---
+        team_a, team_b = get_teams_from_name(match_name)
+        
+        # Priority 1: Status Check (Bulletproof for 2nd Innings)
+        if status_lower:
+            if any(phrase in status_lower for phrase in [f"{team_a.lower()} need", f"{team_a.lower()} require", f"{team_a.lower()} trail"]):
+                team_batting = team_a
+                team_bowling = team_b
+            elif any(phrase in status_lower for phrase in [f"{team_b.lower()} need", f"{team_b.lower()} require", f"{team_b.lower()} trail"]):
+                team_batting = team_b
+                team_bowling = team_a
+
+        # Priority 2: Score Abbreviation Parsing (For 1st Innings)
         if score_div:
             full_score_text = score_div.get_text(separator=" ", strip=True)
-            
-            # --- FIX: ISOLATE THE ACTIVE INNINGS ---
-            active_score_text = full_score_text.split('&')[-1].strip()
-            
-            # --- SMART BATTING TEAM DETECTOR ---
-            abbrev_match = re.search(r'^([A-Za-z]+)', active_score_text)
-            if abbrev_match:
-                abbrev = abbrev_match.group(1).upper()
-                teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
-                
-                overrides = {
-                    "RSA": "South Africa", "SA": "South Africa",
-                    "IND": "India", "AUS": "Australia", 
-                    "ENG": "England", "NZ": "New Zealand",
-                    "PAK": "Pakistan", "SL": "Sri Lanka", "SRI": "Sri Lanka",
-                    "WI": "West Indies", "BAN": "Bangladesh", "ZIM": "Zimbabwe",
-                    "AFG": "Afghanistan", "IRE": "Ireland"
-                }
-                
-                if abbrev in overrides:
-                    mapped = overrides[abbrev]
-                    for t in teams_in_match:
-                        if mapped.lower() in t.lower():
-                            team_batting = t
-                            break
-                
-                if not team_batting:
-                    for t in teams_in_match:
-                        words = t.split()
-                        if len(words) > 1:
-                            initials = "".join([w[0].upper() for w in words])
-                            if abbrev == initials or abbrev.endswith(initials):
-                                team_batting = t
-                                break
-                        if t.upper().startswith(abbrev):
-                            team_batting = t
-                            break
-
-            # Fallback if Cricbuzz formatting is weird
-            if not team_batting and status_text:
-                teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
-                for t in teams_in_match:
-                    if f"{t.lower()} need" in status_lower or f"{t.lower()} require" in status_lower or f"{t.lower()} trail" in status_lower:
-                        team_batting = t
-                        break
-            
-            # --- BOWLING TEAM IDENTIFICATION ---
-            teams_in_match = [t.strip() for t in re.split(r'\s+vs\s+|\s+v\s+', match_name, flags=re.IGNORECASE)]
-            if team_batting:
-                for t in teams_in_match:
-                    if t.lower() != team_batting.lower():
-                        team_bowling = t
-                        break
+            if not team_batting:
+                active_score_text = full_score_text.split('&')[-1].strip()
+                abbrev_match = re.search(r'^([A-Za-z]+)', active_score_text)
+                if abbrev_match:
+                    abbrev = abbrev_match.group(1).upper()
+                    
+                    overrides = {
+                        "RSA": "South Africa", "SA": "South Africa",
+                        "IND": "India", "AUS": "Australia", 
+                        "ENG": "England", "NZ": "New Zealand",
+                        "PAK": "Pakistan", "SL": "Sri Lanka", "SRI": "Sri Lanka",
+                        "WI": "West Indies", "BAN": "Bangladesh", "ZIM": "Zimbabwe",
+                        "AFG": "Afghanistan", "IRE": "Ireland", "NED": "Netherlands"
+                    }
+                    
+                    mapped = overrides.get(abbrev, abbrev)
+                    
+                    if mapped.lower() in team_a.lower() or abbrev == "".join([w[0].upper() for w in team_a.split()]):
+                        team_batting = team_a
+                        team_bowling = team_b
+                    elif mapped.lower() in team_b.lower() or abbrev == "".join([w[0].upper() for w in team_b.split()]):
+                        team_batting = team_b
+                        team_bowling = team_a
 
             # Parse numbers
             p = score_div.find_all("div")
@@ -601,14 +583,13 @@ def fetch_match_update(match_url, match_name):
             last_ov = 0.0
             last_wk = 0
             last_wk_ov = -10.0
-            last_double_strike_wk = 0  # Reset for new innings
+            last_double_strike_wk = 0  
             current_innings = 2
 
         is_innings_break = (wickets == 10 and not is_match_over) or any(
             phrase in status_lower for phrase in ["innings break", "target", "stumps", "lunch", "tea"]
         )
 
-        # Build Match Facts Dict for the AI
         match_facts = {
             "match_name": match_name,
             "event_type": "LIVE UPDATE",
@@ -620,9 +601,6 @@ def fetch_match_update(match_url, match_name):
             "raw_data": full_score_text + " " + commentary_text
         }
 
-        # FIX: The Database Loop Bug
-        # We process DB insert for new match, but DO NOT silently return if the match is already over 
-        # or at a break. This allows the bot to send the Winning/Innings post immediately.
         if is_new_match:
             try:
                 cursor.execute(
@@ -633,7 +611,6 @@ def fetch_match_update(match_url, match_name):
             except sqlite3.Error:
                 pass
             
-            # Return early ONLY if it's mid-game. 
             if not is_match_over and not is_innings_break and wickets < 3:
                 return
 
@@ -643,20 +620,16 @@ def fetch_match_update(match_url, match_name):
         # 🚨 THE STRICT EVENT HIERARCHY 🚨
         # ==========================================
 
-        # 1. MATCH END LOGIC (Blocks over updates)
+        # 1. MATCH END LOGIC
         if is_match_over:
             eid = f"{m_id}_MATCH_END"
             if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                 match_facts["event_type"] = "MATCH_END"
                 msg = f"🏆 *MATCH COMPLETED: FINAL RESULT* 🏆\n—————————————————\n🎯 *{status_text}*\n\n🔹 {match_name}\n🔹 Final Score: *{score_display}* ({overs_raw})\n\n🖼 [Tap for Winning Moments]({get_img_link(match_name)})\n—————————————————\n✅ *Coverage concluded.*"
                 cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-                
-                # Un-comment the line below if you want the bot to auto-mute finished matches
-                # cursor.execute("INSERT OR REPLACE INTO tracking_config VALUES (?, ?, 0)", (m_id, match_name))
                 conn.commit()
                 send_telegram(msg, pro_edit=True, match_facts=match_facts)
             
-            # Must update state even on Match End
             try:
                 cursor.execute(
                     "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings, last_double_strike_wk) VALUES (?,?,?,?,?,?,?)",
@@ -664,7 +637,7 @@ def fetch_match_update(match_url, match_name):
                 )
                 conn.commit()
             except sqlite3.Error: pass
-            return # EXIT IMMEDIATELY!
+            return
 
         # 2. INNINGS BREAK
         elif is_innings_break:
@@ -692,19 +665,17 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🚨 *EARLY COLLAPSE* 🚨\n—————————————————\n💥 Huge trouble early on!\n\n🏏 *MATCH:* {match_name}\n📊 *SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST WICKET:* _{event_text}_\n\n🖼 [Tap for Match Action]({get_img_link(match_name)})\n—————————————————\n📉 *The batting side is under massive pressure!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
             
-            # --- FIX: DOUBLE STRIKE RESET LOGIC ---
             elif last_wk_ov > 0 and abs(cur_balls - overs_to_balls(str(last_wk_ov))) <= 6 and wickets >= last_double_strike_wk + 2:
                 eid = f"{m_id}_DOUBLE_STRIKE_{wickets}"
                 if not cursor.execute("SELECT 1 FROM events WHERE id=?", (eid,)).fetchone():
                     match_facts["event_type"] = "DOUBLE_WICKET"
                     msg = f"🔥 *DOUBLE STRIKE* 🔥\n—————————————————\n🎯 Two quick wickets have changed the momentum!\n\n🏏 *MATCH:* {match_name}\n📊 *NEW SCORE:* *{score_display}* ({overs_raw})\n💬 *LATEST:* _{event_text}_\n\n🖼 [Tap for Celebration Photos]({get_img_link(match_name)})\n—————————————————\n⚠️ *Huge turning point in the game!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
-                    # Record that we sent an alert at this specific wicket count
                     last_double_strike_wk = wickets 
             
             last_wk_ov = new_wk_ov
 
-        # 5. OVER MILESTONES (FORMAT AWARE)
+        # 5. OVER MILESTONES
         elif not msg:
             is_t20 = "T20" in match_name.upper()
             is_odi = "ODI" in match_name.upper()
@@ -718,7 +689,6 @@ def fetch_match_update(match_url, match_name):
 
             passed_m = None
             for m in milestones:
-                # FIX: `last_ov` is now always up-to-date at the bottom of the loop
                 if last_ov < m and cur_overs >= m:
                     passed_m = m
                     break
@@ -737,7 +707,7 @@ def fetch_match_update(match_url, match_name):
                     msg = f"🏏 *{phase_header} UPDATE* 🏏\n—————————————————\n🏆 *{match_name}*\n\n📊 *SCORE:* *{score_display}*\n🕒 *OVERS:* {cur_overs}\n📈 *RUN RATE:* {crr}\n\n⚡ *LATEST:* _{event_text}_\n\n🖼 [Tap for Match Photos]({get_img_link(match_name)})\n—————————————————\n🔔 *Stay tuned for more live action!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # 6. PLAYER MILESTONES (50 / 100)
+        # 6. PLAYER MILESTONES
         if not msg:
             event_type = None
             speed_alert = ""
@@ -767,20 +737,18 @@ def fetch_match_update(match_url, match_name):
                     msg = f"{header}\n—————————————————\n⭐ *Player Milestone*\n\n🏏 *MATCH:* {match_name}\n📊 *CURRENT SCORE:* *{score_display}* ({overs_raw})\n💬 *COMMENTARY:* _{event_text}_\n\n🖼 [Tap for Player Photos]({get_img_link(match_name + ' ' + event_text)})\n—————————————————\n👏 *What a knock! Share the news!*"
                     cursor.execute("INSERT INTO events VALUES (?)", (eid,))
 
-        # FIRE TELEGRAM MESSAGE
         if msg:
             send_telegram(msg, pro_edit=True, match_facts=match_facts)
 
-        # UPDATE DB STATE - FIX: This must always fire to ensure tracking doesn't stall
         try:
             cursor.execute(
                 "INSERT OR REPLACE INTO state (m_id, last_over, last_wickets, toss_done, last_wicket_over, innings, last_double_strike_wk) VALUES (?,?,?,?,?,?,?)",
                 (m_id, cur_overs, wickets, toss_done, last_wk_ov, current_innings, last_double_strike_wk),
             )
+            conn.commit()
         except sqlite3.Error:
             pass
 
-        conn.commit()
     except Exception as e:
         logger.error(f"fetch_match_update failed for {match_url}:\n{traceback.format_exc()}")
 
@@ -807,7 +775,6 @@ def run_bot():
                     "SELECT is_active FROM tracking_config WHERE m_id=?", (m_id,)
                 ).fetchone()
                 
-                # Apply default mute logic for Women's matches
                 default_active = 0 if is_womens_match(name) else 1
                 is_tracking = row[0] if row else default_active
 
